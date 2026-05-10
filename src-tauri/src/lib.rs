@@ -4,6 +4,7 @@ pub mod models;
 pub mod network;
 pub mod proxy;
 pub mod storage;
+pub mod subscription;
 pub mod tray;
 #[cfg(target_os = "linux")]
 pub mod tun;
@@ -94,6 +95,7 @@ pub fn run() {
             commands::delete_server,
             commands::export_servers,
             commands::import_servers,
+            commands::add_servers_from_subscription,
             commands::get_speed_stats,
             commands::get_logs,
             commands::clear_logs,

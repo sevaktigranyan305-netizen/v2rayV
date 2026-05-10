@@ -38,7 +38,7 @@ pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::err
     TrayIconBuilder::new()
         .icon(icon)
         .menu(&menu)
-        .tooltip("RustVPN")
+        .tooltip("v2rayV")
         .show_menu_on_left_click(false)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "show" => {

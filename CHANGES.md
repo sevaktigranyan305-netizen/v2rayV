@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to RustVPN are documented in this file.
+All notable changes to v2rayV are documented in this file.
 
 ## [0.2.1] — 2026-02-26
 

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    rustvpn_lib::run();
+    v2rayv_lib::run();
 }

@@ -1,4 +1,4 @@
-# RustVPN — Tauri IPC API Reference
+# v2rayV — Tauri IPC API Reference
 
 All commands are invoked from the frontend via `src/lib/api/tauri.ts` using `@tauri-apps/api/core`'s `invoke()`. On the Rust side, commands return `Result<T, String>` — on error, the `invoke()` call rejects with the error string.
 

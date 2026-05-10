@@ -76,6 +76,15 @@ function createServersStore() {
 		return created;
 	}
 
+	async function importFromSubscription(url: string): Promise<ServerConfig[]> {
+		const imported = await api.addServersFromSubscription(url);
+		await load();
+		if (imported.length > 0) {
+			selectedId = imported[0].id;
+		}
+		return imported;
+	}
+
 	async function exportToJson(): Promise<string> {
 		return await api.exportServers();
 	}
@@ -108,6 +117,7 @@ function createServersStore() {
 		selectServerByIndex,
 		importFromJson,
 		importFromUri,
+		importFromSubscription,
 		exportToJson,
 		exportToUri
 	};

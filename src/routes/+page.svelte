@@ -154,6 +154,15 @@
 		}
 	}
 
+	async function handleImportSubscription(url: string) {
+		try {
+			const imported = await servers.importFromSubscription(url);
+			showToast(`Imported ${imported.length} server(s) from subscription`);
+		} catch (e) {
+			showToast(`Subscription import failed: ${e}`, 'error');
+		}
+	}
+
 	async function handleExportJson() {
 		try {
 			const json = await servers.exportToJson();
@@ -209,7 +218,7 @@
 	<div class="flex items-center justify-between pt-2">
 		<div class="w-8"></div>
 		<div class="text-center">
-			<h1 class="text-xl font-bold tracking-widest uppercase text-foreground/90">RustVPN</h1>
+			<h1 class="text-xl font-bold tracking-widest uppercase text-foreground/90">v2rayV</h1>
 			<p class="text-xs text-muted-foreground mt-0.5">VLESS + REALITY</p>
 		</div>
 		<ThemeToggle />
@@ -224,6 +233,7 @@
 	<ImportExportBar
 		onImportJson={handleImportJson}
 		onImportUri={handleImportUri}
+		onImportSubscription={handleImportSubscription}
 		onExportJson={handleExportJson}
 		onExportUri={handleExportUri}
 		onToast={showToast}

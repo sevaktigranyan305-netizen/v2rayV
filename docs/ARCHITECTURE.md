@@ -1,11 +1,11 @@
-# RustVPN — Architecture
+# v2rayV — Architecture
 
 ## System Overview
 
-RustVPN is a cross-platform VPN client that manages xray-core as a child process (sidecar). The Svelte frontend communicates with the Rust backend exclusively through Tauri's IPC bridge. The backend can route system traffic in two modes:
+v2rayV is a cross-platform VPN client that manages xray-core as a child process (sidecar). The Svelte frontend communicates with the Rust backend exclusively through Tauri's IPC bridge. The backend can route system traffic in two modes:
 
 - **Proxy mode** (default; all desktop OSes): xray exposes local SOCKS5 + HTTP listeners and `proxy.rs` enables a system-wide proxy via `gsettings` (Linux), the registry (Windows), or `networksetup` (macOS).
-- **TUN mode** (Linux): a dedicated `rustvpn-helper` (invoked via `pkexec`) creates a TUN interface and runs hev-socks5-tunnel to convert TUN packets into SOCKS5 traffic. Required for full system VPN behaviour when the system proxy alone is insufficient.
+- **TUN mode** (Linux): a dedicated `v2rayv-helper` (invoked via `pkexec`) creates a TUN interface and runs hev-socks5-tunnel to convert TUN packets into SOCKS5 traffic. Required for full system VPN behaviour when the system proxy alone is insufficient.
 
 ```mermaid
 graph TD
@@ -56,7 +56,7 @@ graph TD
         XRAY --> STATS
     end
 
-    subgraph Helper [rustvpn-helper - root, pkexec]
+    subgraph Helper [v2rayv-helper - root, pkexec]
         HEV[hev-socks5-tunnel]
         TUNDEV[rvpn0 TUN device]
         IPRULE[ip rule / route mgmt]
@@ -79,7 +79,7 @@ graph TD
 
 | File | Responsibility |
 |------|---------------|
-| `main.rs` | Entry point; calls `rustvpn_lib::run()` |
+| `main.rs` | Entry point; calls `v2rayv_lib::run()` |
 | `lib.rs` | Tauri builder setup: registers plugins, manages `XrayManager` state, hooks startup recovery (stale TUN cleanup, system-proxy reset, auto-connect), registers all IPC commands |
 | `models.rs` | Core data types: `ServerConfig`, `RealitySettings`, `ConnectionInfo`, `ConnectionStatus`, `SpeedStats`, `LogEntry`, `AppSettings`, `DetectedVpn`, `AppError` |
 | `commands.rs` | All `#[tauri::command]` handlers — connection, server CRUD, import/export, settings, logs, speed stats, bypass-domain reload, battery-optimization helpers, VPN detection |
@@ -87,7 +87,7 @@ graph TD
 | `config.rs` | `generate_client_config()` builds the xray JSON config (proxy or TUN flavour) |
 | `network.rs` | `detect_vpn_routes()` — detects corporate VPN interfaces/subnets via `ip -j route show`; `collect_bypass_subnets()` flattens results; `detect_default_gateway_and_ip()` for TUN setup; corporate-VPN DNS scrape from `/etc/resolv.conf` |
 | `proxy.rs` _(desktop)_ | `enable_system_proxy()` / `disable_system_proxy()` / `reset_stale_system_proxy()` — Linux (`gsettings`), Windows (registry), macOS (`networksetup`) |
-| `tun.rs` _(Linux)_ | `start_tun()` / `stop_tun()` / `cleanup_stale_tun()` — talks to `rustvpn-helper` via `pkexec` to create the `rvpn0` TUN device, run `hev-socks5-tunnel`, and add `ip rule` / `ip route` entries |
+| `tun.rs` _(Linux)_ | `start_tun()` / `stop_tun()` / `cleanup_stale_tun()` — talks to `v2rayv-helper` via `pkexec` to create the `rvpn0` TUN device, run `hev-socks5-tunnel`, and add `ip rule` / `ip route` entries |
 | `tray.rs` _(desktop)_ | System tray menu (Show / Connect / Quit), updates the toggle label by listening for `connection-status-changed` |
 | `storage.rs` | Reads/writes `servers.json` and `settings.json` in the OS app config directory |
 | `uri.rs` | `parse_vless_uri()` and `to_vless_uri()` — VLESS URI serialization; also exposes `parse_vless_uri_cmd` and `export_vless_uri` as Tauri commands |
@@ -305,8 +305,8 @@ When the user enables TUN mode (or `send_through` is required for routing), `Xra
 2. Calls `network::detect_vpn_routes()` to harvest corporate-VPN subnets and DNS servers.
 3. Generates the xray config with `send_through = Some(local_ip)` so outbounds bind to the physical interface.
 4. Starts xray.
-5. Calls `tun::start_tun()`, which invokes `rustvpn-helper` via `pkexec` with the gateway, device, local IP, server IP and bypass subnets. The helper runs as root, creates the `rvpn0` TUN device, launches `hev-socks5-tunnel` to convert TUN packets into SOCKS5 traffic against xray's local listener, and configures the kernel routing tables (default route via `rvpn0`, `ip rule from <local_ip> lookup main` to escape the TUN for xray's own outbound, and a `/32` route to the VPN server).
+5. Calls `tun::start_tun()`, which invokes `v2rayv-helper` via `pkexec` with the gateway, device, local IP, server IP and bypass subnets. The helper runs as root, creates the `rvpn0` TUN device, launches `hev-socks5-tunnel` to convert TUN packets into SOCKS5 traffic against xray's local listener, and configures the kernel routing tables (default route via `rvpn0`, `ip rule from <local_ip> lookup main` to escape the TUN for xray's own outbound, and a `/32` route to the VPN server).
 
 `tun::stop_tun()` reverses everything via the helper. The helper itself watches the app PID and self-destructs if the GUI exits without calling `stop_tun` (defence against orphaned TUN setups).
 
-For TUN mode to work, the helper must be installed once with `sudo ./scripts/install-helper.sh` (places `/usr/local/sbin/rustvpn-helper` and a polkit rule).
+For TUN mode to work, the helper must be installed once with `sudo ./scripts/install-helper.sh` (places `/usr/local/sbin/v2rayv-helper` and a polkit rule).
