@@ -63,6 +63,11 @@ jobs:
           mkdir -p src-tauri/binaries
           touch "src-tauri/binaries/xray-${{ matrix.rust_target }}${{ matrix.sidecar_ext }}"
           touch "src-tauri/binaries/hev-socks5-tunnel-${{ matrix.rust_target }}${{ matrix.sidecar_ext }}"
+          # tauri.windows.conf.json declares wintun.dll as a Windows-only bundle
+          # resource; tauri-build validates that path during cargo check too.
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            touch "src-tauri/binaries/wintun.dll"
+          fi
 
       - name: cargo fmt
         working-directory: src-tauri
