@@ -1,4 +1,4 @@
-# RustVPN — Project Instructions
+# v2rayV — Project Instructions
 
 ## Overview
 Desktop VPN client using VLESS+REALITY protocol via xray-core sidecar. Built with Tauri v2 (Rust backend) + Svelte 5 + SvelteKit (frontend).

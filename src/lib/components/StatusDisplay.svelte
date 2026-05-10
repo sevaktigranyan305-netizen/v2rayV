@@ -1,18 +1,12 @@
 <script lang="ts">
 	import { cn } from '$lib/utils';
-	import { formatSpeed, formatBytes } from '$lib/utils/format';
 	import type { ConnectionInfo } from '$lib/types';
 
 	interface Props {
 		info: ConnectionInfo;
-		elapsedSeconds: number;
-		uploadSpeed: number;
-		downloadSpeed: number;
-		totalUpload: number;
-		totalDownload: number;
 	}
 
-	const { info, elapsedSeconds, uploadSpeed, downloadSpeed, totalUpload, totalDownload }: Props = $props();
+	const { info }: Props = $props();
 
 	const statusLabel = $derived(() => {
 		switch (info.status) {
@@ -42,13 +36,6 @@
 				return 'bg-zinc-500';
 		}
 	});
-
-	function formatElapsed(seconds: number): string {
-		const h = Math.floor(seconds / 3600);
-		const m = Math.floor((seconds % 3600) / 60);
-		const s = seconds % 60;
-		return [h, m, s].map((v) => String(v).padStart(2, '0')).join(':');
-	}
 </script>
 
 <!-- Status dot + label -->
@@ -56,16 +43,6 @@
 	<span class={cn('w-2.5 h-2.5 rounded-full', statusColor())}></span>
 	<span class="text-sm font-medium text-foreground/80">{statusLabel()}</span>
 </div>
-
-<!-- Connection timer -->
-{#if info.status === 'connected'}
-	<div class="text-center">
-		<p class="text-3xl font-mono font-light text-foreground/70 tracking-widest">
-			{formatElapsed(elapsedSeconds)}
-		</p>
-		<p class="text-xs text-muted-foreground mt-1">Connected</p>
-	</div>
-{/if}
 
 <!-- Server info -->
 {#if info.server_name || info.server_address}
@@ -82,22 +59,6 @@
 				<span class="text-foreground font-mono">{info.server_address}</span>
 			</div>
 		{/if}
-	</div>
-{/if}
-
-<!-- Speed stats -->
-{#if info.status === 'connected'}
-	<div class="w-full grid grid-cols-2 gap-3" style="animation: fadeIn 0.3s ease-out">
-		<div class="bg-card rounded-lg border border-border p-3 text-center">
-			<p class="text-[10px] text-muted-foreground mb-1 uppercase tracking-wider">Download</p>
-			<p class="text-lg font-mono font-medium text-green-500">{formatSpeed(downloadSpeed)}</p>
-			<p class="text-[10px] text-muted-foreground mt-0.5">{formatBytes(totalDownload)}</p>
-		</div>
-		<div class="bg-card rounded-lg border border-border p-3 text-center">
-			<p class="text-[10px] text-muted-foreground mb-1 uppercase tracking-wider">Upload</p>
-			<p class="text-lg font-mono font-medium text-blue-500">{formatSpeed(uploadSpeed)}</p>
-			<p class="text-[10px] text-muted-foreground mt-0.5">{formatBytes(totalUpload)}</p>
-		</div>
 	</div>
 {/if}
 

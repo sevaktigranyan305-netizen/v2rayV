@@ -5,46 +5,19 @@
 	import { settingsStore } from '$lib/stores/settings.svelte';
 	import ConnectButton from '$lib/components/ConnectButton.svelte';
 	import StatusDisplay from '$lib/components/StatusDisplay.svelte';
-	import SpeedGraph from '$lib/components/SpeedGraph.svelte';
 	import ServerList from '$lib/components/ServerList.svelte';
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import ImportExportBar from '$lib/components/ImportExportBar.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
-	import { detectVpnInterfaces } from '$lib/api/tauri';
-	import type { ServerConfig, DetectedVpn } from '$lib/types';
+	import type { ServerConfig } from '$lib/types';
 
 	const store = connectionStore;
 	const servers = serversStore;
 	const appSettings = settingsStore;
 
-	// Timer state
-	let elapsedSeconds = $state(0);
-	let timerInterval: ReturnType<typeof setInterval> | null = null;
-
 	// Form modal state
 	let showForm = $state(false);
 	let editingServer = $state<ServerConfig | null>(null);
-
-	// Detected VPNs state
-	let detectedVpns = $state<DetectedVpn[]>([]);
-	let vpnDetecting = $state(false);
-
-	async function refreshVpnDetection() {
-		if (vpnDetecting) return;
-		vpnDetecting = true;
-		// Cap the detection call so a hung backend can't leave the button
-		// stuck on "Detecting…" forever.
-		const timeout = new Promise<never>((_, reject) =>
-			setTimeout(() => reject(new Error('Timed out after 10s')), 10000)
-		);
-		try {
-			detectedVpns = await Promise.race([detectVpnInterfaces(), timeout]);
-		} catch (e) {
-			showToast(`VPN detection failed: ${e}`, 'error');
-		} finally {
-			vpnDetecting = false;
-		}
-	}
 
 	// Toast state
 	let toast = $state<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -59,36 +32,8 @@
 		}, 3000);
 	}
 
-	function startTimer() {
-		if (timerInterval !== null) return;
-		elapsedSeconds = 0;
-		if (store.info.connected_since) {
-			const nowSecs = Math.floor(Date.now() / 1000);
-			elapsedSeconds = Math.max(0, nowSecs - store.info.connected_since);
-		}
-		timerInterval = setInterval(() => {
-			elapsedSeconds += 1;
-		}, 1000);
-	}
-
-	function stopTimer() {
-		if (timerInterval !== null) {
-			clearInterval(timerInterval);
-			timerInterval = null;
-		}
-		elapsedSeconds = 0;
-	}
-
-	$effect(() => {
-		if (store.info.status === 'connected') {
-			startTimer();
-		} else {
-			stopTimer();
-		}
-	});
-
 	async function handleToggle() {
-		if (store.isLoading || store.isTransitioning) return;
+		if (store.isTransitioning) return;
 		if (store.isConnected) {
 			await store.disconnectVpn();
 			return;
@@ -154,6 +99,15 @@
 		}
 	}
 
+	async function handleImportSubscription(url: string) {
+		try {
+			const imported = await servers.importFromSubscription(url);
+			showToast(`Imported ${imported.length} server(s) from subscription`);
+		} catch (e) {
+			showToast(`Subscription import failed: ${e}`, 'error');
+		}
+	}
+
 	async function handleExportJson() {
 		try {
 			const json = await servers.exportToJson();
@@ -193,25 +147,18 @@
 		}
 		store.refresh();
 		store.startPolling();
-		refreshVpnDetection();
 	});
 
 	onDestroy(() => {
 		store.stopPolling();
-		stopTimer();
 		if (toastTimer !== null) clearTimeout(toastTimer);
 	});
 </script>
 
 <div class="min-h-screen bg-background text-foreground flex flex-col p-4 gap-4 pb-safe">
 
-	<!-- App header -->
-	<div class="flex items-center justify-between pt-2">
-		<div class="w-8"></div>
-		<div class="text-center">
-			<h1 class="text-xl font-bold tracking-widest uppercase text-foreground/90">RustVPN</h1>
-			<p class="text-xs text-muted-foreground mt-0.5">VLESS + REALITY</p>
-		</div>
+	<!-- App header (theme toggle only) -->
+	<div class="flex items-center justify-end pt-2">
 		<ThemeToggle />
 	</div>
 
@@ -224,6 +171,7 @@
 	<ImportExportBar
 		onImportJson={handleImportJson}
 		onImportUri={handleImportUri}
+		onImportSubscription={handleImportSubscription}
 		onExportJson={handleExportJson}
 		onExportUri={handleExportUri}
 		onToast={showToast}
@@ -261,127 +209,20 @@
 		</label>
 	</div>
 
-	<!-- Bypass domains (split tunneling) -->
-	<details class="group">
-		<summary class="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors px-1 flex items-center gap-1">
-			<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-open:rotate-90">
-				<polyline points="9 18 15 12 9 6" />
-			</svg>
-			Bypass domains ({appSettings.settings.bypass_domains?.length ?? 0})
-		</summary>
-		<div class="mt-1.5 px-1">
-			<textarea
-				class="w-full bg-background border border-border rounded-lg px-3 py-2 text-xs text-foreground font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring resize-none"
-				rows="3"
-				placeholder="One domain per line, e.g.&#10;claude.ai&#10;anthropic.com"
-				value={appSettings.settings.bypass_domains?.join('\n') ?? ''}
-				onchange={async (e) => {
-					// Accept only syntactically plausible hostnames: letters, digits,
-					// dots, hyphens. Strip anything that looks like junk rather than
-					// forwarding it to the backend, where it would silently break the
-					// xray routing rules or gsettings bypass list.
-					const domainRegex = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/i;
-					const raw = e.currentTarget.value
-						.split('\n')
-						.map((d) => d.trim().toLowerCase())
-						.filter((d) => d.length > 0);
-					const valid = raw.filter((d) => domainRegex.test(d));
-					const invalid = raw.filter((d) => !domainRegex.test(d));
-					if (invalid.length > 0) {
-						showToast(`Ignored ${invalid.length} invalid domain(s)`, 'error');
-					}
-					try {
-						const reloaded = await appSettings.setBypassDomains(valid);
-						if (reloaded) {
-							showToast('Reloaded VPN with new bypass list');
-						}
-					} catch (err) {
-						showToast(`Failed to save settings: ${err}`, 'error');
-					}
-				}}
-			></textarea>
-			<p class="text-[10px] text-muted-foreground/60 mt-0.5">These domains bypass the VPN tunnel (one per line). Applied immediately — the VPN auto-reloads if connected.</p>
-		</div>
-	</details>
-
-	<!-- Detected corporate VPNs -->
-	<details class="group">
-		<summary class="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors px-1 flex items-center gap-1">
-			<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-open:rotate-90">
-				<polyline points="9 18 15 12 9 6" />
-			</svg>
-			Corporate VPNs ({detectedVpns.length})
-		</summary>
-		<div class="mt-1.5 px-1 space-y-1.5">
-			{#if detectedVpns.length === 0}
-				<p class="text-[10px] text-muted-foreground/60">No corporate VPN interfaces detected.</p>
-			{:else}
-				{#each detectedVpns as vpn}
-					<div class="text-xs bg-muted/30 rounded-md px-2.5 py-1.5 border border-border/50">
-						<div class="flex items-center gap-1.5">
-							<span class="font-mono font-medium text-foreground">{vpn.interface}</span>
-							<span class="text-muted-foreground">({vpn.vpn_type})</span>
-						</div>
-						{#if vpn.subnets.length > 0}
-							<div class="text-[10px] text-muted-foreground/80 mt-0.5 font-mono">
-								{vpn.subnets.join(', ')}
-							</div>
-						{/if}
-						{#if vpn.server_ip}
-							<div class="text-[10px] text-muted-foreground/80 mt-0.5 font-mono">
-								Server: {vpn.server_ip}
-							</div>
-						{/if}
-					</div>
-				{/each}
-			{/if}
-			<div class="flex items-center justify-between">
-				<p class="text-[10px] text-muted-foreground/60">Detected subnets are auto-bypassed on connect.</p>
-				<button
-					class="text-[10px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
-					onclick={refreshVpnDetection}
-					disabled={vpnDetecting}
-				>
-					{vpnDetecting ? 'Detecting...' : 'Refresh'}
-				</button>
-			</div>
-		</div>
-	</details>
-
 	<!-- Divider -->
 	<div class="border-t border-border"></div>
 
 	<!-- Center section: status + button + info -->
 	<div class="flex flex-col items-center gap-6 flex-1 justify-center py-2">
-		<StatusDisplay
-			info={store.info}
-			{elapsedSeconds}
-			uploadSpeed={store.stats.upload_speed}
-			downloadSpeed={store.stats.download_speed}
-			totalUpload={store.stats.total_upload}
-			totalDownload={store.stats.total_download}
-		/>
+		<StatusDisplay info={store.info} />
 
 		<ConnectButton
 			status={store.info.status}
-			isLoading={store.isLoading}
 			isTransitioning={store.isTransitioning}
 			isConnected={store.isConnected}
 			onclick={handleToggle}
 		/>
 	</div>
-
-	<!-- Speed graph -->
-	{#if store.info.status === 'connected'}
-		<div class="w-full px-1">
-			<SpeedGraph
-				uploadHistory={store.speedHistory.upload}
-				downloadHistory={store.speedHistory.download}
-				uploadSpeed={store.stats.upload_speed}
-				downloadSpeed={store.stats.download_speed}
-			/>
-		</div>
-	{/if}
 
 </div>
 

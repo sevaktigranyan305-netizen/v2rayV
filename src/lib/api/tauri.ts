@@ -39,6 +39,10 @@ export async function importServers(json: string): Promise<ServerConfig[]> {
 	return await invoke<ServerConfig[]>('import_servers', { json });
 }
 
+export async function addServersFromSubscription(url: string): Promise<ServerConfig[]> {
+	return await invoke<ServerConfig[]>('add_servers_from_subscription', { url });
+}
+
 // VLESS URI
 export async function parseVlessUri(uri: string): Promise<ServerConfig> {
 	return await invoke<ServerConfig>('parse_vless_uri_cmd', { uri });

@@ -1,4 +1,4 @@
-# RustVPN — Developer Setup Guide
+# v2rayV — Developer Setup Guide
 
 ## Prerequisites
 
@@ -28,13 +28,13 @@ Refer to the [official Tauri prerequisites](https://tauri.app/start/prerequisite
 
 ### TUN mode helper (Linux only, optional)
 
-For the full system-VPN experience on Linux, RustVPN runs `hev-socks5-tunnel` as root via a small privileged helper (`rustvpn-helper`) launched through `pkexec`. Install the helper and its polkit rule once:
+For the full system-VPN experience on Linux, v2rayV runs `hev-socks5-tunnel` as root via a small privileged helper (`v2rayv-helper`) launched through `pkexec`. Install the helper and its polkit rule once:
 
 ```bash
 sudo ./scripts/install-helper.sh
 ```
 
-This places `/usr/local/sbin/rustvpn-helper` and the policy file from `polkit/`. Without it, the app falls back to system-proxy mode (works for most apps, but not every TCP/UDP source).
+This places `/usr/local/sbin/v2rayv-helper` and the policy file from `polkit/`. Without it, the app falls back to system-proxy mode (works for most apps, but not every TCP/UDP source).
 
 ### xray-core binary (required at runtime)
 
@@ -56,7 +56,7 @@ Download the appropriate release from [XTLS/Xray-core releases](https://github.c
 
 ```bash
 git clone <repo-url>
-cd RustVPN
+cd v2rayV
 
 # Install frontend dependencies
 pnpm install
@@ -103,7 +103,7 @@ cargo fmt               # Auto-format Rust code
 ## Project Structure
 
 ```
-RustVPN/
+v2rayV/
 ├── src-tauri/                    # Rust backend (Tauri)
 │   ├── src/
 │   │   ├── main.rs               # Binary entry point
@@ -115,7 +115,7 @@ RustVPN/
 │   │   ├── config.rs             # generate_client_config()
 │   │   ├── network.rs            # Corporate VPN detection (ip -j route show), DNS scrape
 │   │   ├── proxy.rs              # System proxy enable/disable (Linux/Win/macOS) — desktop only
-│   │   ├── tun.rs                # Linux TUN mode via rustvpn-helper / pkexec
+│   │   ├── tun.rs                # Linux TUN mode via v2rayv-helper / pkexec
 │   │   ├── tray.rs               # System tray menu (desktop only)
 │   │   ├── storage.rs            # Load/save servers.json + settings.json
 │   │   └── uri.rs                # VLESS URI parse and serialize
@@ -126,9 +126,9 @@ RustVPN/
 │   └── tauri.conf.json           # Tauri configuration (window, bundle, sidecar)
 │
 ├── scripts/                      # Helper installer + xray downloader
-│   ├── install-helper.sh         # Installs rustvpn-helper for Linux TUN mode
-│   ├── rustvpn-helper            # The privileged TUN helper itself
-├── polkit/                       # polkit rule for rustvpn-helper
+│   ├── install-helper.sh         # Installs v2rayv-helper for Linux TUN mode
+│   ├── v2rayv-helper            # The privileged TUN helper itself
+├── polkit/                       # polkit rule for v2rayv-helper
 │
 ├── src/                          # Svelte 5 + SvelteKit frontend
 │   ├── routes/
@@ -212,7 +212,7 @@ The generated xray JSON config is written to:
 <app_data_dir>/xray_config.json
 ```
 
-On Linux this is typically `~/.local/share/com.rustvpn.app/xray_config.json`. The file is deleted on disconnect.
+On Linux this is typically `~/.local/share/com.v2rayv.app/xray_config.json`. The file is deleted on disconnect.
 
 ### Server list and settings storage
 
@@ -223,7 +223,7 @@ Two JSON files are persisted in the OS app config directory:
 <app_config_dir>/settings.json  # AppSettings (auto_connect, last_server_id, bypass_domains)
 ```
 
-On Linux: `~/.config/com.rustvpn.app/`. On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id`.
+On Linux: `~/.config/com.v2rayv.app/`. On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id`.
 
 ### Hide-to-tray and auto-connect
 

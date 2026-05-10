@@ -1,5 +1,5 @@
 #!/bin/bash
-# Privileged helper for RustVPN TUN operations.
+# Privileged helper for v2rayV TUN operations.
 # Intended to be run via pkexec with a polkit policy that caches credentials.
 set -euo pipefail
 
@@ -175,7 +175,7 @@ case "$ACTION" in
     ;;
 
   *)
-    echo "Usage: rustvpn-helper {start|stop} [args...]" >&2
+    echo "Usage: v2rayv-helper {start|stop} [args...]" >&2
     exit 1
     ;;
 esac

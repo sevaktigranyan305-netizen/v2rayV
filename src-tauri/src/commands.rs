@@ -5,6 +5,7 @@ use crate::models::{
 };
 use crate::network;
 use crate::storage;
+use crate::subscription;
 use crate::xray::XrayManager;
 
 #[tauri::command]
@@ -120,6 +121,34 @@ pub fn import_servers<R: Runtime>(
     let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
     // Assign fresh ids to imported servers to avoid collisions
     let new_servers: Vec<ServerConfig> = imported
+        .into_iter()
+        .map(|mut s| {
+            s.id = uuid::Uuid::new_v4().to_string();
+            s
+        })
+        .collect();
+    servers.extend(new_servers.clone());
+    storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
+    Ok(new_servers)
+}
+
+/// One-shot subscription import: fetch the URL, decode (base64 or plaintext),
+/// parse every `vless://` line, persist the new servers (with fresh ids), and
+/// return the imported set. Existing servers are preserved.
+#[tauri::command]
+pub async fn add_servers_from_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    url: String,
+) -> Result<Vec<ServerConfig>, String> {
+    let parsed = subscription::fetch_subscription(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    if parsed.is_empty() {
+        return Err("No vless:// servers found in subscription".to_string());
+    }
+
+    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
+    let new_servers: Vec<ServerConfig> = parsed
         .into_iter()
         .map(|mut s| {
             s.id = uuid::Uuid::new_v4().to_string();

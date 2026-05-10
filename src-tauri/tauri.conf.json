@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "RustVPN",
-  "version": "0.9.5",
-  "identifier": "com.rustvpn.app",
+  "productName": "v2rayV",
+  "version": "1.0.0",
+  "identifier": "com.v2rayv.app",
   "build": {
     "frontendDist": "../build",
     "devUrl": "http://localhost:5173",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "RustVPN",
+        "title": "v2rayV",
         "width": 420,
         "height": 680,
         "resizable": false,

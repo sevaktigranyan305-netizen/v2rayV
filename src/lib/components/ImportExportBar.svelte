@@ -2,18 +2,28 @@
 	import { open, save } from '@tauri-apps/plugin-dialog';
 	import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 	import UriInputModal from './UriInputModal.svelte';
+	import SubscriptionModal from './SubscriptionModal.svelte';
 
 	interface Props {
 		onImportJson: (json: string) => Promise<void>;
 		onImportUri: (uri: string) => Promise<void>;
+		onImportSubscription: (url: string) => Promise<void>;
 		onExportJson: () => Promise<string | null>;
 		onExportUri: () => Promise<string | null>;
 		onToast: (message: string, type?: 'success' | 'error') => void;
 	}
 
-	const { onImportJson, onImportUri, onExportJson, onExportUri, onToast }: Props = $props();
+	const {
+		onImportJson,
+		onImportUri,
+		onImportSubscription,
+		onExportJson,
+		onExportUri,
+		onToast
+	}: Props = $props();
 
 	let showUriModal = $state(false);
+	let showSubscriptionModal = $state(false);
 	let showImportMenu = $state(false);
 	let showExportMenu = $state(false);
 
@@ -37,6 +47,11 @@
 		showUriModal = true;
 	}
 
+	function importFromSubscription() {
+		showImportMenu = false;
+		showSubscriptionModal = true;
+	}
+
 	async function handleUriImport(uri: string) {
 		// Keep the modal open until the import finishes, so a slow parse/save
 		// doesn't mislead the user into thinking it succeeded before it has.
@@ -44,6 +59,14 @@
 			await onImportUri(uri);
 		} finally {
 			showUriModal = false;
+		}
+	}
+
+	async function handleSubscriptionImport(url: string) {
+		try {
+			await onImportSubscription(url);
+		} finally {
+			showSubscriptionModal = false;
 		}
 	}
 
@@ -131,6 +154,17 @@
 					</svg>
 					From vless:// URI
 				</button>
+				<button
+					onclick={(e) => { e.stopPropagation(); importFromSubscription(); }}
+					class="w-full text-left px-3 py-2 text-sm text-foreground hover:bg-zinc-700/60 transition-colors flex items-center gap-2"
+					role="menuitem"
+				>
+					<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M2 12h20"/>
+						<path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+					</svg>
+					From Subscription URL
+				</button>
 			</div>
 		{/if}
 	</div>
@@ -188,4 +222,11 @@
 
 {#if showUriModal}
 	<UriInputModal onImport={handleUriImport} onCancel={() => { showUriModal = false; }} />
+{/if}
+
+{#if showSubscriptionModal}
+	<SubscriptionModal
+		onImport={handleSubscriptionImport}
+		onCancel={() => { showSubscriptionModal = false; }}
+	/>
 {/if}

@@ -1,4 +1,4 @@
-# RustVPN — xray-core Configuration Reference
+# v2rayV — xray-core Configuration Reference
 
 ## What is REALITY?
 
@@ -241,7 +241,7 @@ xray always listens on `127.0.0.1:10808` (hardcoded as `DEFAULT_SOCKS_PORT` in `
 
 ## vless:// URI Format
 
-The vless:// URI is a shareable string encoding all parameters needed to configure a server. RustVPN can import and export these URIs.
+The vless:// URI is a shareable string encoding all parameters needed to configure a server. v2rayV can import and export these URIs.
 
 ### Format specification
 

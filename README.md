@@ -1,8 +1,8 @@
-# RustVPN
+# v2rayV
 
 Desktop VPN client using the **VLESS + REALITY** protocol — currently the most DPI-resistant tunneling method, achieving a ~99.5% bypass rate against Russian TSPU deep packet inspection. Built with Tauri v2, Svelte 5, and xray-core.
 
-RustVPN mimics normal HTTPS traffic to sites like `microsoft.com`, making VPN connections invisible to traffic analysis systems.
+v2rayV mimics normal HTTPS traffic to sites like `microsoft.com`, making VPN connections invisible to traffic analysis systems.
 
 ## Features
 
@@ -51,8 +51,8 @@ RustVPN mimics normal HTTPS traffic to sites like `microsoft.com`, making VPN co
 ### Setup
 
 ```bash
-git clone https://github.com/Shurubtsov/rustvpn.git
-cd rustvpn
+git clone https://github.com/sevaktigranyan305-netizen/v2rayV.git
+cd v2rayV
 
 # Install frontend dependencies
 pnpm install
@@ -141,7 +141,7 @@ docs/                   Documentation
 
 ## Server Setup
 
-RustVPN requires a VLESS+REALITY server. See [docs/XRAY_CONFIG.md](docs/XRAY_CONFIG.md) for full server setup instructions.
+v2rayV requires a VLESS+REALITY server. See [docs/XRAY_CONFIG.md](docs/XRAY_CONFIG.md) for full server setup instructions.
 
 Quick summary — install xray-core on your VDS and configure it with VLESS+REALITY inbound on port 443. The client needs:
 

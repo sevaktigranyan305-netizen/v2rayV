@@ -23,7 +23,7 @@ const TUN_NAME: &str = "rvpn0";
 const TUN_ADDR: &str = "198.18.0.1/15";
 const TUN_GW: &str = "198.18.0.0";
 const TUN_MTU: &str = "8500";
-const HELPER_NAME: &str = "rustvpn-helper";
+const HELPER_NAME: &str = "v2rayv-helper";
 
 /// Check if a stale TUN device exists from a previous crash and clean it up.
 pub fn cleanup_stale_tun(config_dir: &Path) {
@@ -128,7 +128,7 @@ fn resolve_helper() -> Result<String, AppError> {
     }
 
     Err(AppError::Config(
-        "rustvpn-helper not found. Run: sudo ./scripts/install-helper.sh".to_string(),
+        "v2rayv-helper not found. Run: sudo ./scripts/install-helper.sh".to_string(),
     ))
 }
 

@@ -52,7 +52,7 @@ pub fn detect_vpn_routes() -> Vec<DetectedVpn> {
 
 /// Flatten all detected VPN subnets and server IPs into a single bypass list.
 /// When any corporate VPN is active, always prepend all RFC-1918 ranges so that
-/// corporate DNS servers and internal servers bypass the RustVPN TUN and use the
+/// corporate DNS servers and internal servers bypass the v2rayV TUN and use the
 /// corporate VPN's correct source IP via the main routing table.
 pub fn collect_bypass_subnets(vpns: &[DetectedVpn]) -> Vec<String> {
     if vpns.is_empty() {

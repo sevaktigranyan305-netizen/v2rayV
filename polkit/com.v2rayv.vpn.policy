@@ -3,18 +3,18 @@
  "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <vendor>RustVPN</vendor>
-  <vendor_url>https://github.com/Shurubtsov/rustvpn</vendor_url>
+  <vendor>v2rayV</vendor>
+  <vendor_url>https://github.com/sevaktigranyan305-netizen/v2rayV</vendor_url>
 
-  <action id="org.freedesktop.policykit.pkexec.rustvpn-helper">
-    <description>RustVPN: Manage VPN tunnel</description>
-    <message>RustVPN needs elevated privileges to create a VPN tunnel.</message>
+  <action id="org.freedesktop.policykit.pkexec.v2rayv-helper">
+    <description>v2rayV: Manage VPN tunnel</description>
+    <message>v2rayV needs elevated privileges to create a VPN tunnel.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin_keep</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/rustvpn-helper</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/v2rayv-helper</annotate>
     <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
   </action>
 </policyconfig>

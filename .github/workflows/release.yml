@@ -9,7 +9,7 @@ on:
         type: string
 
 env:
-  XRAY_VERSION: "v26.2.6"
+  XRAY_VERSION: "v0.0.14-test"
   HEV_VERSION: "2.14.4"
 
 jobs:
@@ -20,23 +20,14 @@ jobs:
         include:
           - platform: ubuntu-latest
             rust_target: x86_64-unknown-linux-gnu
-            xray_archive: Xray-linux-64.zip
-            xray_binary: xray
-            sidecar_name: xray-x86_64-unknown-linux-gnu
             hev_binary: hev-socks5-tunnel-linux-x86_64
             hev_sidecar_name: hev-socks5-tunnel-x86_64-unknown-linux-gnu
           - platform: windows-latest
             rust_target: x86_64-pc-windows-msvc
-            xray_archive: Xray-windows-64.zip
-            xray_binary: xray.exe
-            sidecar_name: xray-x86_64-pc-windows-msvc.exe
             hev_binary: ""
             hev_sidecar_name: ""
           - platform: macos-latest
             rust_target: aarch64-apple-darwin
-            xray_archive: Xray-macos-arm64-v8a.zip
-            xray_binary: xray
-            sidecar_name: xray-aarch64-apple-darwin
             hev_binary: hev-socks5-tunnel-darwin-arm64
             hev_sidecar_name: hev-socks5-tunnel-aarch64-apple-darwin
 
@@ -78,19 +69,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
 
-      # Download xray-core sidecar binary
+      # Download xray-core sidecar from our fork (bundles wintun.dll on Windows).
       - name: Download xray-core binary
         shell: bash
-        run: |
-          mkdir -p src-tauri/binaries
-          curl -sL "https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${{ matrix.xray_archive }}" -o /tmp/xray.zip
-          unzip -o /tmp/xray.zip "${{ matrix.xray_binary }}" -d /tmp/xray-extracted
-          mv "/tmp/xray-extracted/${{ matrix.xray_binary }}" "src-tauri/binaries/${{ matrix.sidecar_name }}"
-          chmod +x "src-tauri/binaries/${{ matrix.sidecar_name }}" || true
+        run: ./scripts/download-xray.sh "${XRAY_VERSION}"
 
       # Download hev-socks5-tunnel sidecar binary (Linux and macOS only)
       - name: Download hev-socks5-tunnel binary

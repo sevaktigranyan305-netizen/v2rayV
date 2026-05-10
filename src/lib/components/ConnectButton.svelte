@@ -4,23 +4,27 @@
 
 	interface Props {
 		status: 'disconnected' | 'connecting' | 'connected' | 'disconnecting' | 'error';
-		isLoading: boolean;
 		isTransitioning: boolean;
 		isConnected: boolean;
 		onclick: () => void;
 	}
 
-	const { status, isLoading, isTransitioning, isConnected, onclick }: Props = $props();
+	const { status, isTransitioning, isConnected, onclick }: Props = $props();
 
+	// Drive button label and disabled state from `info.status` only — not from
+	// the in-flight IPC promise. Otherwise the button stays "Connecting..." and
+	// disabled until `connect()` finally returns even though the poll loop has
+	// already observed the backend in the connected state, leaving the user
+	// unable to click Disconnect.
 	const buttonLabel = $derived.by(() => {
-		if (isLoading || isTransitioning) {
+		if (isTransitioning) {
 			return status === 'disconnecting' ? 'Disconnecting...' : 'Connecting...';
 		}
 		if (status === 'error') return 'Retry';
 		return isConnected ? 'Disconnect' : 'Connect';
 	});
 
-	const isDisabled = $derived(isLoading || isTransitioning);
+	const isDisabled = $derived(isTransitioning);
 
 	// On mobile, use a slightly larger button to ensure comfortable touch target
 	const buttonSize = 'w-36 h-36';
