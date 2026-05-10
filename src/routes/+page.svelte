@@ -10,12 +10,8 @@
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import ImportExportBar from '$lib/components/ImportExportBar.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
-	import BackgroundModeModal from '$lib/components/BackgroundModeModal.svelte';
-	import { isMobile, isDesktop } from '$lib/utils/platform';
-	import { detectVpnInterfaces, isBatteryOptimizationIgnored } from '$lib/api/tauri';
+	import { detectVpnInterfaces } from '$lib/api/tauri';
 	import type { ServerConfig, DetectedVpn } from '$lib/types';
-
-	const BG_MODAL_DISMISS_KEY = 'rustvpn.bgModeModalDismissed';
 
 	const store = connectionStore;
 	const servers = serversStore;
@@ -32,15 +28,6 @@
 	// Detected VPNs state
 	let detectedVpns = $state<DetectedVpn[]>([]);
 	let vpnDetecting = $state(false);
-
-	// Mobile background-mode setup state. The modal is shown on the first
-	// connect attempt if battery optimization isn't already exempt and the
-	// user hasn't checked "don't show again". `batteryOptIgnored` is also
-	// used by the modal's step 1 indicator to flip to a checkmark once the
-	// user grants the exemption from the system dialog.
-	let showBgModal = $state(false);
-	let batteryOptIgnored = $state(true);
-	let pendingConnectServer = $state<ServerConfig | null>(null);
 
 	async function refreshVpnDetection() {
 		if (vpnDetecting) return;
@@ -118,44 +105,7 @@
 			return;
 		}
 
-		// On mobile: surface the background-mode setup modal once if the user
-		// hasn't ticked "don't show again" and battery optimization isn't yet
-		// exempt. The actual connect kicks off after the user dismisses the
-		// modal, so they don't immediately see the VPN die after first launch.
-		if (isMobile()) {
-			const dismissed = localStorage.getItem(BG_MODAL_DISMISS_KEY) === '1';
-			if (!dismissed) {
-				try {
-					batteryOptIgnored = await isBatteryOptimizationIgnored();
-				} catch {
-					// If the platform check fails treat it as exempt — better to
-					// connect and have the user discover the issue than to block
-					// every connect on a flaky probe.
-					batteryOptIgnored = true;
-				}
-				if (!batteryOptIgnored) {
-					pendingConnectServer = selected;
-					showBgModal = true;
-					return;
-				}
-			}
-		}
-
 		await store.connectVpn(selected);
-	}
-
-	function closeBgModal(dismissForever: boolean) {
-		showBgModal = false;
-		if (dismissForever) {
-			localStorage.setItem(BG_MODAL_DISMISS_KEY, '1');
-		}
-		const pending = pendingConnectServer;
-		pendingConnectServer = null;
-		if (pending) {
-			// User finished the setup flow — proceed with the connect they
-			// originally requested. Run unawaited so the modal closes cleanly.
-			store.connectVpn(pending);
-		}
 	}
 
 	function openAdd() {
@@ -243,9 +193,7 @@
 		}
 		store.refresh();
 		store.startPolling();
-		if (isDesktop()) {
-			refreshVpnDetection();
-		}
+		refreshVpnDetection();
 	});
 
 	onDestroy(() => {
@@ -356,8 +304,7 @@
 		</div>
 	</details>
 
-	<!-- Detected corporate VPNs (desktop only) -->
-	{#if isDesktop()}
+	<!-- Detected corporate VPNs -->
 	<details class="group">
 		<summary class="text-xs text-muted-foreground cursor-pointer hover:text-foreground transition-colors px-1 flex items-center gap-1">
 			<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="transition-transform group-open:rotate-90">
@@ -400,7 +347,6 @@
 			</div>
 		</div>
 	</details>
-	{/if}
 
 	<!-- Divider -->
 	<div class="border-t border-border"></div>
@@ -445,15 +391,6 @@
 		server={editingServer}
 		onSave={handleSave}
 		onCancel={closeForm}
-	/>
-{/if}
-
-<!-- Background mode setup modal (mobile only, on first connect) -->
-{#if showBgModal}
-	<BackgroundModeModal
-		{batteryOptIgnored}
-		onClose={closeBgModal}
-		onBatteryOptChanged={(granted) => { batteryOptIgnored = granted; }}
 	/>
 {/if}
 

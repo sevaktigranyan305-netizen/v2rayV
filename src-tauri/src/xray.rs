@@ -3,11 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{error, info, warn};
-#[allow(unused_imports)]
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-#[cfg(desktop)]
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
-#[cfg(desktop)]
 use tauri_plugin_shell::ShellExt;
 
 use crate::config;
@@ -15,9 +12,7 @@ use crate::config::generate_client_config;
 use crate::models::{
     AppError, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
 };
-#[cfg(desktop)]
 use crate::network;
-#[cfg(desktop)]
 use crate::proxy;
 #[cfg(target_os = "linux")]
 use crate::tun;
@@ -26,18 +21,14 @@ const DEFAULT_SOCKS_PORT: u16 = 10808;
 const MAX_LOG_ENTRIES: usize = 1000;
 
 pub struct XrayManager {
-    #[cfg(desktop)]
     child: Arc<Mutex<Option<CommandChild>>>,
     state: Arc<Mutex<ConnectionInfo>>,
-    #[cfg(desktop)]
     config_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     stats: Arc<Mutex<SpeedStats>>,
     prev_uplink: Arc<Mutex<u64>>,
     prev_downlink: Arc<Mutex<u64>>,
     logs: Arc<Mutex<VecDeque<LogEntry>>>,
-    #[cfg(desktop)]
     bypass_domains: Arc<Mutex<Vec<String>>>,
-    #[cfg(desktop)]
     bypass_subnets: Arc<Mutex<Vec<String>>>,
     detected_vpns: Arc<Mutex<Vec<DetectedVpn>>>,
 }
@@ -51,18 +42,14 @@ impl Default for XrayManager {
 impl XrayManager {
     pub fn new() -> Self {
         Self {
-            #[cfg(desktop)]
             child: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(ConnectionInfo::default())),
-            #[cfg(desktop)]
             config_path: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(SpeedStats::default())),
             prev_uplink: Arc::new(Mutex::new(0)),
             prev_downlink: Arc::new(Mutex::new(0)),
             logs: Arc::new(Mutex::new(VecDeque::new())),
-            #[cfg(desktop)]
             bypass_domains: Arc::new(Mutex::new(Vec::new())),
-            #[cfg(desktop)]
             bypass_subnets: Arc::new(Mutex::new(Vec::new())),
             detected_vpns: Arc::new(Mutex::new(Vec::new())),
         }
@@ -75,27 +62,6 @@ impl XrayManager {
 
     pub fn status(&self) -> ConnectionInfo {
         self.state.lock().unwrap().clone()
-    }
-
-    /// Adopt an already-running VPN session's state without re-launching anything.
-    ///
-    /// On Android, the native VpnService can survive the Tauri activity being
-    /// destroyed (swipe from recents). When the activity is re-created, this
-    /// method is called so the UI reflects the still-active session instead of
-    /// showing Disconnected. `connected_since` is set to now — the original
-    /// start time isn't recoverable without extra persistence.
-    #[cfg(mobile)]
-    pub fn adopt_running_state(&self, server: &ServerConfig) {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or_default();
-        let mut state = self.state.lock().unwrap();
-        state.status = ConnectionStatus::Connected;
-        state.server_name = Some(server.name.clone());
-        state.server_address = Some(server.address.clone());
-        state.connected_since = Some(now);
-        state.error_message = None;
     }
 
     pub fn get_logs(&self) -> Vec<LogEntry> {
@@ -130,20 +96,11 @@ impl XrayManager {
         // Update status to connecting
         self.update_status(ConnectionStatus::Connecting, Some(server), None);
 
-        #[cfg(desktop)]
-        {
-            self.start_desktop(app, server, bypass_domains)?;
-        }
-
-        #[cfg(mobile)]
-        {
-            self.start_mobile(app, server, bypass_domains)?;
-        }
+        self.start_desktop(app, server, bypass_domains)?;
 
         Ok(())
     }
 
-    #[cfg(desktop)]
     fn start_desktop<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -476,14 +433,11 @@ impl XrayManager {
             }
 
             // Step 2: Check system proxy configuration
-            #[cfg(desktop)]
-            {
-                push_log_entry(
-                    &verify_logs,
-                    "info",
-                    &format!("[verify] System proxy configured for port {DEFAULT_SOCKS_PORT}"),
-                );
-            }
+            push_log_entry(
+                &verify_logs,
+                "info",
+                &format!("[verify] System proxy configured for port {DEFAULT_SOCKS_PORT}"),
+            );
 
             // Step 3: Wait and check for traffic flow
             push_log_entry(&verify_logs, "info", "[verify] Waiting for traffic flow...");
@@ -650,246 +604,10 @@ impl XrayManager {
         Ok(())
     }
 
-    #[cfg(mobile)]
-    fn start_mobile<R: Runtime>(
-        &self,
-        app: &AppHandle<R>,
-        server: &ServerConfig,
-        bypass_domains: &[String],
-    ) -> Result<(), AppError> {
-        use tauri_plugin_vpn::VpnPluginExt;
-
-        // Generate xray config (no bypass subnets on mobile)
-        let mut config_json =
-            generate_client_config(server, DEFAULT_SOCKS_PORT, bypass_domains, &[], None, &[])?;
-
-        // Apply Android-specific modifications
-        config_json = config::modify_config_for_android(&config_json)?;
-
-        // Start VPN via plugin (this triggers the Android service asynchronously)
-        app.vpn()
-            .start_vpn(config_json, DEFAULT_SOCKS_PORT, server.address.clone())
-            .map_err(|e| AppError::XrayProcess(format!("VPN plugin error: {e}")))?;
-
-        // Poll the Android service status to verify the pipeline is actually working.
-        // Don't set Connected until both xray and hev are confirmed running.
-        // Log each verification step to the app log buffer for user visibility.
-        let state_ref = self.state.clone();
-        let logs_ref = self.logs.clone();
-        let stats_ref = self.stats.clone();
-        let app_handle = app.clone();
-        let server_name = server.name.clone();
-        let server_address = server.address.clone();
-
-        std::thread::spawn(move || {
-            push_log_entry(&logs_ref, "info", "[android] Starting VPN service...");
-
-            let max_attempts = 30; // 15 seconds at 500ms intervals
-            for attempt in 1..=max_attempts {
-                std::thread::sleep(Duration::from_millis(500));
-
-                let vpn_status = {
-                    let vpn = app_handle.vpn();
-                    vpn.get_status()
-                };
-
-                match vpn_status {
-                    Ok(status) => {
-                        // Log component status on first few polls and periodically
-                        if attempt <= 3 || attempt % 5 == 0 {
-                            push_log_entry(
-                                &logs_ref,
-                                "info",
-                                &format!(
-                                    "[android] Poll #{attempt}: xray={}, hev={}, tun={}, running={}",
-                                    status.xray_running, status.hev_running,
-                                    status.tun_active, status.is_running,
-                                ),
-                            );
-                        }
-
-                        if status.is_running {
-                            // Android service confirmed everything is running
-                            push_log_entry(
-                                &logs_ref,
-                                "info",
-                                &format!(
-                                    "[verify] Android VPN pipeline confirmed: xray={}, hev={}, tun={}",
-                                    status.xray_running, status.hev_running, status.tun_active,
-                                ),
-                            );
-
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-
-                            let mut state = state_ref.lock().unwrap();
-                            if state.status == ConnectionStatus::Connecting {
-                                state.status = ConnectionStatus::Connected;
-                                state.connected_since = Some(now);
-                                state.server_name = Some(server_name);
-                                state.server_address = Some(server_address);
-                                state.error_message = None;
-                                info!("Mobile VPN connected (verified by service)");
-                            }
-                            drop(state);
-                            let _ = app_handle.emit("connection-status-changed", "connected");
-
-                            // Post-connection: verify traffic flow
-                            push_log_entry(
-                                &logs_ref,
-                                "info",
-                                "[verify] Waiting for traffic flow...",
-                            );
-                            std::thread::sleep(Duration::from_secs(5));
-
-                            // Check if still connected
-                            {
-                                let state = state_ref.lock().unwrap();
-                                if state.status != ConnectionStatus::Connected {
-                                    return;
-                                }
-                            }
-
-                            let cached = stats_ref.lock().unwrap().clone();
-                            if cached.total_upload > 0 || cached.total_download > 0 {
-                                push_log_entry(
-                                    &logs_ref,
-                                    "info",
-                                    &format!(
-                                        "[verify] Traffic flowing — upload: {} bytes, download: {} bytes",
-                                        cached.total_upload, cached.total_download,
-                                    ),
-                                );
-                                info!(
-                                    "[verify] Mobile traffic flowing — up: {} B, down: {} B",
-                                    cached.total_upload, cached.total_download
-                                );
-                            } else {
-                                push_log_entry(
-                                    &logs_ref,
-                                    "warning",
-                                    "[verify] No traffic detected after 5s — VPN may not be routing correctly",
-                                );
-                                warn!("[verify] No mobile traffic after 5s");
-
-                                // Wait longer and check again
-                                std::thread::sleep(Duration::from_secs(10));
-                                {
-                                    let state = state_ref.lock().unwrap();
-                                    if state.status != ConnectionStatus::Connected {
-                                        return;
-                                    }
-                                }
-                                let cached = stats_ref.lock().unwrap().clone();
-                                if cached.total_upload > 0 || cached.total_download > 0 {
-                                    push_log_entry(
-                                        &logs_ref,
-                                        "info",
-                                        &format!(
-                                            "[verify] Traffic detected after 15s — upload: {} bytes, download: {} bytes",
-                                            cached.total_upload, cached.total_download,
-                                        ),
-                                    );
-                                } else {
-                                    push_log_entry(
-                                        &logs_ref,
-                                        "error",
-                                        "[verify] Still no traffic after 15s — connection may be broken. Check server config and network.",
-                                    );
-                                    error!("[verify] No mobile traffic after 15s, connection may be broken");
-                                }
-                            }
-                            return;
-                        }
-                        if let Some(err) = &status.last_error {
-                            // Service reported an error — clean up the Android service
-                            push_log_entry(
-                                &logs_ref,
-                                "error",
-                                &format!("[android] VPN service error: {err}"),
-                            );
-                            // Log which components failed
-                            if !status.xray_running {
-                                push_log_entry(
-                                    &logs_ref,
-                                    "error",
-                                    "[android] xray-core failed to start",
-                                );
-                            }
-                            if !status.hev_running {
-                                push_log_entry(
-                                    &logs_ref,
-                                    "error",
-                                    "[android] hev-socks5-tunnel failed to start",
-                                );
-                            }
-                            if !status.tun_active {
-                                push_log_entry(
-                                    &logs_ref,
-                                    "error",
-                                    "[android] TUN interface not established",
-                                );
-                            }
-                            let _ = app_handle.vpn().stop_vpn();
-                            let mut state = state_ref.lock().unwrap();
-                            if state.status == ConnectionStatus::Connecting {
-                                state.status = ConnectionStatus::Error;
-                                state.error_message = Some(err.clone());
-                                state.connected_since = None;
-                                warn!("Mobile VPN failed: {}", err);
-                            }
-                            let _ = app_handle.emit("connection-status-changed", "disconnected");
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to poll VPN status: {}", e);
-                        if attempt <= 2 {
-                            push_log_entry(
-                                &logs_ref,
-                                "warning",
-                                &format!("[android] Status poll failed: {e}"),
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Timeout — service never confirmed running, clean up
-            push_log_entry(
-                &logs_ref,
-                "error",
-                "[android] Connection timeout — VPN service did not start within 15s",
-            );
-            let _ = app_handle.vpn().stop_vpn();
-            let mut state = state_ref.lock().unwrap();
-            if state.status == ConnectionStatus::Connecting {
-                state.status = ConnectionStatus::Error;
-                state.error_message =
-                    Some("Connection timeout — VPN service did not start within 15s".to_string());
-                state.connected_since = None;
-                warn!("Mobile VPN connection timeout");
-            }
-            let _ = app_handle.emit("connection-status-changed", "disconnected");
-        });
-
-        Ok(())
-    }
-
     pub fn stop(&self) -> Result<(), AppError> {
         self.update_status(ConnectionStatus::Disconnecting, None, None);
 
-        #[cfg(desktop)]
-        {
-            self.stop_desktop()?;
-        }
-
-        #[cfg(mobile)]
-        {
-            self.stop_mobile()?;
-        }
+        self.stop_desktop()?;
 
         // Update status
         self.update_status(ConnectionStatus::Disconnected, None, None);
@@ -900,7 +618,6 @@ impl XrayManager {
         Ok(())
     }
 
-    #[cfg(desktop)]
     fn stop_desktop(&self) -> Result<(), AppError> {
         // Stop TUN mode first (Linux only) — must happen before killing xray
         // so hev-socks5-tunnel can cleanly shut down while SOCKS5 is still available
@@ -955,14 +672,6 @@ impl XrayManager {
         Ok(())
     }
 
-    #[cfg(mobile)]
-    fn stop_mobile(&self) -> Result<(), AppError> {
-        // On mobile, we can't call the plugin here directly without an AppHandle.
-        // The stop is triggered via the command layer which calls the plugin.
-        // This method just handles state cleanup.
-        Ok(())
-    }
-
     pub fn test_connection(&self) -> Result<bool, AppError> {
         // Only report success if we actually believe we're connected — otherwise
         // a probe against the SOCKS port can succeed against a stale/reused
@@ -1000,41 +709,26 @@ impl XrayManager {
             }
         }
 
-        #[cfg(desktop)]
-        let (uplink, downlink) = {
-            // Run xray api statsquery via sidecar
-            let output = app
-                .shell()
-                .sidecar("xray")
-                .map_err(|e| {
-                    AppError::XrayProcess(format!("Failed to create sidecar command: {e}"))
-                })?
-                .args(["api", "statsquery", "-s", config::STATS_API_ADDR])
-                .output()
-                .await
-                .map_err(|e| AppError::XrayProcess(format!("Failed to query stats: {e}")))?;
+        // Run xray api statsquery via sidecar
+        let output = app
+            .shell()
+            .sidecar("xray")
+            .map_err(|e| AppError::XrayProcess(format!("Failed to create sidecar command: {e}")))?
+            .args(["api", "statsquery", "-s", config::STATS_API_ADDR])
+            .output()
+            .await
+            .map_err(|e| AppError::XrayProcess(format!("Failed to query stats: {e}")))?;
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-            let combined = if stdout.contains(">>>") {
-                &stdout
-            } else {
-                &stderr
-            };
-
-            Self::parse_stats_output(combined)
+        let combined = if stdout.contains(">>>") {
+            &stdout
+        } else {
+            &stderr
         };
 
-        #[cfg(mobile)]
-        let (uplink, downlink) = {
-            use tauri_plugin_vpn::VpnPluginExt;
-            let stats = app
-                .vpn()
-                .query_stats()
-                .map_err(|e| AppError::XrayProcess(format!("Failed to query mobile stats: {e}")))?;
-            (stats.upload, stats.download)
-        };
+        let (uplink, downlink) = Self::parse_stats_output(combined);
 
         // Compute speed from delta
         let mut prev_up = self.prev_uplink.lock().unwrap();
@@ -1078,7 +772,6 @@ impl XrayManager {
     }
 
     /// Parse xray statsquery JSON output
-    #[cfg(desktop)]
     fn parse_stats_output(output: &str) -> (u64, u64) {
         let mut uplink: u64 = 0;
         let mut downlink: u64 = 0;

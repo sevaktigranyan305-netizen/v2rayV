@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { cn } from '$lib/utils';
-	import { isMobile } from '$lib/utils/platform';
+	
 
 	interface Props {
 		status: 'disconnected' | 'connecting' | 'connected' | 'disconnecting' | 'error';
@@ -23,7 +23,7 @@
 	const isDisabled = $derived(isLoading || isTransitioning);
 
 	// On mobile, use a slightly larger button to ensure comfortable touch target
-	const buttonSize = $derived(isMobile() ? 'w-40 h-40' : 'w-36 h-36');
+	const buttonSize = 'w-36 h-36';
 </script>
 
 <div class="relative">

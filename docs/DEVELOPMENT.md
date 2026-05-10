@@ -52,32 +52,6 @@ where `<target-triple>` is your platform identifier, for example:
 
 Download the appropriate release from [XTLS/Xray-core releases](https://github.com/XTLS/Xray-core/releases).
 
-### Android-specific prerequisites
-
-| Tool | Version | Install |
-|------|---------|---------|
-| Android SDK | API 34 | via Android Studio or `sdkmanager` |
-| Android NDK | 27.0.12077973 | `sdkmanager "ndk;27.0.12077973"` |
-| Rust Android target | — | `rustup target add aarch64-linux-android` |
-
-### Android binaries (required at runtime)
-
-The Android build requires two native binaries placed in:
-
-```
-src-tauri/tauri-plugin-vpn/android/src/main/jniLibs/arm64-v8a/
-├── libxray.so     # xray-core for Android ARM64
-└── libhev.so      # hev-socks5-tunnel for Android ARM64
-```
-
-Download them using the helper script:
-
-```bash
-./scripts/download-android-binaries.sh
-```
-
-A JNI wrapper library (`libhevjni.so`) is compiled automatically by the NDK/CMake build — no manual download needed.
-
 ## Clone and Run
 
 ```bash
@@ -138,24 +112,22 @@ RustVPN/
 │   │   │                         #   LogEntry, AppSettings, DetectedVpn, AppError
 │   │   ├── commands.rs           # All #[tauri::command] handlers
 │   │   ├── xray.rs               # XrayManager: sidecar lifecycle, stats poller, log buffer
-│   │   ├── config.rs             # generate_client_config() + modify_config_for_android()
+│   │   ├── config.rs             # generate_client_config()
 │   │   ├── network.rs            # Corporate VPN detection (ip -j route show), DNS scrape
 │   │   ├── proxy.rs              # System proxy enable/disable (Linux/Win/macOS) — desktop only
 │   │   ├── tun.rs                # Linux TUN mode via rustvpn-helper / pkexec
 │   │   ├── tray.rs               # System tray menu (desktop only)
 │   │   ├── storage.rs            # Load/save servers.json + settings.json
 │   │   └── uri.rs                # VLESS URI parse and serialize
-│   ├── tauri-plugin-vpn/         # Custom plugin for Android VpnService (see Android Build below)
 │   ├── binaries/
 │   │   └── xray-<triple>         # xray-core binary (gitignored)
 │   ├── icons/                    # App icons for all platforms
 │   ├── Cargo.toml                # Rust dependencies
 │   └── tauri.conf.json           # Tauri configuration (window, bundle, sidecar)
 │
-├── scripts/                      # Helper installer + Android binary downloader
+├── scripts/                      # Helper installer + xray downloader
 │   ├── install-helper.sh         # Installs rustvpn-helper for Linux TUN mode
 │   ├── rustvpn-helper            # The privileged TUN helper itself
-│   └── download-android-binaries.sh
 ├── polkit/                       # polkit rule for rustvpn-helper
 │
 ├── src/                          # Svelte 5 + SvelteKit frontend
@@ -182,7 +154,6 @@ RustVPN/
 │   │   │   ├── UriInputModal.svelte
 │   │   │   ├── SpeedGraph.svelte         # Upload/download sparkline
 │   │   │   ├── LogViewer.svelte          # Tail of in-memory log buffer
-│   │   │   ├── BackgroundModeModal.svelte # Mobile battery/auto-launch prompt
 │   │   │   ├── ThemeToggle.svelte
 │   │   │   └── ui/                       # shadcn-svelte primitives
 │   │   ├── hooks/                # (reserved)
@@ -199,7 +170,6 @@ RustVPN/
 ├── .claude/                      # Claude Code agents/skills/hooks
 ├── creds/                        # Per-host VLESS credentials (gitignored)
 ├── release-assets/               # Per-platform release artifacts (gitignored)
-├── Dockerfile.android            # Reproducible Android build environment
 ├── svelte.config.js              # SvelteKit adapter-static config
 ├── vite.config.ts                # Vite + Tailwind plugin config
 ├── tsconfig.json                 # TypeScript config
@@ -253,64 +223,17 @@ Two JSON files are persisted in the OS app config directory:
 <app_config_dir>/settings.json  # AppSettings (auto_connect, last_server_id, bypass_domains)
 ```
 
-On Linux: `~/.config/com.rustvpn.app/`. On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id` (unless an Android `VpnService` is already running, in which case it adopts that session).
+On Linux: `~/.config/com.rustvpn.app/`. On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id`.
 
 ### Hide-to-tray and auto-connect
 
 Closing the main window does **not** quit the app — `lib.rs` intercepts `WindowEvent::CloseRequested`, calls `prevent_close()`, and hides the window. The system tray (configured in `tray.rs`) keeps the connection alive in the background. Use the tray's **Quit** entry to actually exit, or send `SIGINT` via the terminal during `pnpm tauri dev`.
-
-## Android Build
-
-```bash
-# One-time setup
-rustup target add aarch64-linux-android
-sdkmanager "ndk;27.0.12077973"
-pnpm tauri android init
-
-# Download native binaries
-./scripts/download-android-binaries.sh
-
-# Build debug APK
-NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973 pnpm tauri android build --apk
-```
-
-The Android build compiles:
-- Rust backend for `aarch64-linux-android`
-- Kotlin plugin code (VpnService, VpnPlugin, HevTunnel)
-- C JNI library (`libhevjni.so`) via NDK/CMake
-
-### Android plugin structure
-
-```
-src-tauri/tauri-plugin-vpn/
-├── src/                          # Rust plugin interface
-│   ├── lib.rs                    # Plugin registration
-│   ├── mobile.rs                 # Android: calls Kotlin via PluginHandle
-│   ├── desktop.rs                # Desktop: stubs (returns NotSupported)
-│   └── commands.rs               # Tauri IPC commands
-├── android/
-│   ├── build.gradle.kts          # Android library build config (CMake/NDK)
-│   └── src/main/
-│       ├── AndroidManifest.xml   # Permissions + VpnService declaration
-│       ├── java/com/rustvpn/vpn/
-│       │   ├── RustVpnService.kt # VPN lifecycle: TUN, xray, hev
-│       │   ├── VpnPlugin.kt     # Tauri plugin bridge, stats query
-│       │   └── HevTunnel.kt     # JNI wrapper — loads libhev.so via dlopen
-│       ├── cpp/
-│       │   ├── hev_jni.c         # JNI dlopen wrapper for hev-socks5-tunnel
-│       │   └── CMakeLists.txt    # CMake config for JNI library
-│       └── jniLibs/arm64-v8a/   # Pre-built binaries (gitignored)
-│           ├── libxray.so
-│           └── libhev.so
-└── Cargo.toml
-```
 
 ## Tauri Plugins Used
 
 | Plugin | Purpose |
 |--------|---------|
 | `tauri-plugin-shell` | Spawns xray sidecar process (desktop only) |
-| `tauri-plugin-vpn` | Android VpnService management (custom in-tree plugin) |
 | `tauri-plugin-dialog` | Open/save file dialogs for JSON import/export |
 | `tauri-plugin-fs` | Read/write files for JSON import/export |
 | `tauri-plugin-log` | Structured logging (debug builds only) |
@@ -321,7 +244,7 @@ The `tauri` crate itself is enabled with the `tray-icon` feature so `tray.rs` ca
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `tauri` | 2.10.0 (feat. `tray-icon`) | Desktop/mobile app framework |
+| `tauri` | 2.10.0 (feat. `tray-icon`) | Desktop app framework |
 | `tauri-build` | 2.5.4 | Build-script support for Tauri |
 | `serde` / `serde_json` | 1.0 | JSON serialization |
 | `thiserror` | 2 | Ergonomic error types |

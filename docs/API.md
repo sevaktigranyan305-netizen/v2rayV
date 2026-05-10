@@ -250,7 +250,7 @@ export async function detectVpnInterfaces(): Promise<DetectedVpn[]>
 
 **Behavior:** Executes `ip -j route show`, parses the JSON output, identifies VPN interfaces by name prefix, collects their non-default routed subnets, and detects VPN server endpoint IPs from static `/32` host routes. This is also called automatically during `connect` — detected subnets are added to both gsettings ignore-hosts and xray routing rules.
 
-On Android the command always returns `Ok(Vec::new())` — no kernel route inspection is available.
+
 
 ---
 
@@ -612,63 +612,6 @@ pub fn clear_logs(manager: State<'_, XrayManager>) -> Result<(), String>
 export async function clearLogs(): Promise<void>
 // invoke('clear_logs')
 ```
-
----
-
-## Mobile Background-Mode Commands
-
-These commands are wired up on every platform, but on desktop they always succeed with a no-op result (there's no Doze and no OEM auto-launch policy to negotiate). The `BackgroundModeModal` component uses them to walk Android users through the permissions needed to keep the VPN running while the app is backgrounded.
-
-### `is_battery_optimization_ignored`
-
-**Rust signature:**
-```rust
-pub fn is_battery_optimization_ignored(app: AppHandle<R>) -> Result<bool, String>
-```
-
-**TypeScript wrapper:**
-```typescript
-export async function isBatteryOptimizationIgnored(): Promise<boolean>
-// invoke('is_battery_optimization_ignored')
-```
-
-**Returns:** `true` if the app is already exempt from Android battery optimization, `false` if the user still needs to grant the exemption. Always `true` on desktop.
-
----
-
-### `request_ignore_battery_optimization`
-
-Opens the system Battery Optimization exemption dialog and resolves with whether the exemption is in effect after dismissal.
-
-**Rust signature:**
-```rust
-pub fn request_ignore_battery_optimization(app: AppHandle<R>) -> Result<bool, String>
-```
-
-**TypeScript wrapper:**
-```typescript
-export async function requestIgnoreBatteryOptimization(): Promise<boolean>
-// invoke('request_ignore_battery_optimization')
-```
-
----
-
-### `open_oem_background_settings`
-
-Best-effort deep-link to the OEM-specific "background activity" or "auto-launch" settings page (Realme/ColorOS, Xiaomi/MIUI, Huawei/EMUI, Vivo, Samsung).
-
-**Rust signature:**
-```rust
-pub fn open_oem_background_settings(app: AppHandle<R>) -> Result<OemSettingsResult, String>
-```
-
-**TypeScript wrapper:**
-```typescript
-export async function openOemBackgroundSettings(): Promise<{ opened: boolean; fallback: boolean }>
-// invoke('open_oem_background_settings')
-```
-
-**Returns:** `opened` is `true` if any settings screen launched; `fallback` is `true` if we landed on the generic application-details screen rather than the OEM-specific page (so the UI can soften the success message).
 
 ---
 

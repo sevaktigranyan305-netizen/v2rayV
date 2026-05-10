@@ -169,7 +169,7 @@ The example below is what gets written to `xray_config.json` in TUN mode with on
 - `socks-in` (`127.0.0.1:<socks_port>`) — SOCKS5 with UDP support.
 - `http-in` (`127.0.0.1:<socks_port + 1>`) — HTTP proxy (some applications can't speak SOCKS5).
 
-Both have sniffing enabled for HTTP and TLS so domain-based routing rules apply even when the client passes only an IP. The HTTP inbound is stripped on Android — see `modify_config_for_android()` below.
+Both have sniffing enabled for HTTP and TLS so domain-based routing rules apply even when the client passes only an IP.
 
 **`outbounds`** — Always at least three; a fourth (`direct-vpn`) is added in TUN mode when bypass subnets are present:
 - `proxy` — VLESS+REALITY outbound to the VDS (default).
@@ -183,13 +183,6 @@ Both have sniffing enabled for HTTP and TLS so domain-based routing rules apply 
 3. **Corporate VPN subnets** (TUN mode + non-empty `bypass_subnets`) → `direct-vpn`. Must precede the next rule so the source-IP-sensitive corporate VPN sees the kernel-assigned address.
 4. **Private IPs + multicast + VPN server IP** → `direct`. Always includes `127.0.0.0/8`, RFC-1918, IPv4 multicast (`224.0.0.0/4`), `::1/128`, ULA, IPv6 multicast (`ff00::/8`), and the VPN server's own `/32` (defense-in-depth alongside the kernel route the helper adds in TUN mode). In proxy-only mode the bypass subnets are folded in here too.
 5. **Everything else** → falls through to the default outbound (`proxy`).
-
-### Android post-processing
-
-After `generate_client_config()` produces the JSON, mobile builds pass it through `modify_config_for_android()` (`config.rs`):
-
-- Adds `streamSettings.sockopt = { "mark": 255 }` to the `proxy` outbound. The Android `VpnService` excludes packets with this mark from the TUN, so xray's own connection to the VDS doesn't loop through its own tunnel.
-- Removes the HTTP inbound. The TUN routes everything to SOCKS5 already, and a second listener on a privileged-ish port is wasted on Android.
 
 ## Server Configuration (VDS)
 

@@ -57,10 +57,8 @@ export interface DetectedVpn {
 }
 
 // Platform types for cross-platform UI adaptations
-export type PlatformType = 'windows' | 'macos' | 'linux' | 'android' | 'ios';
+export type PlatformType = 'windows' | 'macos' | 'linux';
 
 export interface PlatformInfo {
 	platform: PlatformType;
-	isMobile: boolean;
-	isDesktop: boolean;
 }
