@@ -3,7 +3,6 @@ use tauri::{AppHandle, Runtime, State};
 use crate::models::{
     AppSettings, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
 };
-#[cfg(desktop)]
 use crate::network;
 use crate::storage;
 use crate::xray::XrayManager;
@@ -38,25 +37,7 @@ pub fn disconnect<R: Runtime>(
     _app: AppHandle<R>,
     manager: State<'_, XrayManager>,
 ) -> Result<(), String> {
-    // On mobile, tear down the native VPN service. On desktop this is a no-op.
-    // Always run `manager.stop()` afterwards so the in-process state is cleaned
-    // up even if the plugin call fails — otherwise the UI thinks it's
-    // disconnected while the backend still believes a session is active.
-    #[cfg(mobile)]
-    let plugin_err: Option<String> = {
-        use tauri_plugin_vpn::VpnPluginExt;
-        _app.vpn().stop_vpn().err().map(|e| e.to_string())
-    };
-    #[cfg(desktop)]
-    let plugin_err: Option<String> = None;
-
-    let manager_err = manager.stop().err().map(|e| e.to_string());
-
-    match (plugin_err, manager_err) {
-        (None, None) => Ok(()),
-        (Some(a), Some(b)) => Err(format!("VPN plugin: {a}; manager: {b}")),
-        (Some(e), None) | (None, Some(e)) => Err(e),
-    }
+    manager.stop().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -212,7 +193,10 @@ pub fn apply_bypass_domains<R: Runtime>(
         return Ok(false);
     }
 
-    log::info!("Reloading xray with new bypass domains ({} entries)", domains.len());
+    log::info!(
+        "Reloading xray with new bypass domains ({} entries)",
+        domains.len()
+    );
 
     let server_id = settings.last_server_id.clone().ok_or_else(|| {
         "No last_server_id; cannot reload bypass without a known server".to_string()
@@ -234,55 +218,10 @@ pub fn apply_bypass_domains<R: Runtime>(
     Ok(true)
 }
 
-/// Whether the OS already considers the app exempt from battery optimization.
-/// On desktop this is always true (no Doze), so the UI prompt is naturally
-/// skipped without a platform check.
-#[tauri::command]
-pub fn is_battery_optimization_ignored<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    use tauri_plugin_vpn::VpnPluginExt;
-    app.vpn()
-        .is_battery_optimization_ignored()
-        .map(|s| s.ignored)
-        .map_err(|e| e.to_string())
-}
-
-/// Open the system Battery Optimization exemption dialog. Returns whether the
-/// exemption is in effect after the dialog is dismissed (true on desktop).
-#[tauri::command]
-pub fn request_ignore_battery_optimization<R: Runtime>(app: AppHandle<R>) -> Result<bool, String> {
-    use tauri_plugin_vpn::VpnPluginExt;
-    app.vpn()
-        .request_ignore_battery_optimization()
-        .map(|r| r.granted)
-        .map_err(|e| e.to_string())
-}
-
-/// Best-effort deep-link to the OEM-specific "background activity" / "auto-launch"
-/// settings page (Realme/ColorOS, Xiaomi/MIUI, Huawei/EMUI, Vivo, Samsung).
-/// `opened` is whether any settings screen launched at all; `fallback` is true
-/// if we landed on the generic application-details screen instead of the
-/// OEM-specific page (so the UI can soften the success message).
-#[tauri::command]
-pub fn open_oem_background_settings<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<tauri_plugin_vpn::OemSettingsResult, String> {
-    use tauri_plugin_vpn::VpnPluginExt;
-    app.vpn()
-        .open_oem_background_settings()
-        .map_err(|e| e.to_string())
-}
-
 // VPN detection
 #[tauri::command]
 pub fn detect_vpn_interfaces() -> Result<Vec<DetectedVpn>, String> {
-    #[cfg(desktop)]
-    {
-        Ok(network::detect_vpn_routes())
-    }
-    #[cfg(mobile)]
-    {
-        Ok(Vec::new())
-    }
+    Ok(network::detect_vpn_routes())
 }
 
 #[cfg(test)]

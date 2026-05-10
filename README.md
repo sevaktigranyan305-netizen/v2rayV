@@ -116,7 +116,7 @@ src-tauri/              Rust backend
     tray.rs             System tray integration
     uri.rs              vless:// URI parsing and serialization
   binaries/             xray-core sidecar (gitignored)
-  capabilities/         Tauri permissions (desktop + mobile)
+  capabilities/         Tauri permissions
 
 src/                    Svelte 5 frontend
   lib/

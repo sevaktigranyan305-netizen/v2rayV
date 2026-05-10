@@ -1,6 +1,6 @@
 import { platform } from '@tauri-apps/plugin-os';
 
-export type Platform = 'windows' | 'macos' | 'linux' | 'android' | 'ios';
+export type Platform = 'windows' | 'macos' | 'linux';
 
 let currentPlatform: Platform = 'linux';
 
@@ -15,12 +15,4 @@ export async function detectPlatform(): Promise<Platform> {
 
 export function getPlatform(): Platform {
 	return currentPlatform;
-}
-
-export function isMobile(): boolean {
-	return currentPlatform === 'android' || currentPlatform === 'ios';
-}
-
-export function isDesktop(): boolean {
-	return !isMobile();
 }

@@ -7,8 +7,6 @@ RustVPN is a cross-platform VPN client that manages xray-core as a child process
 - **Proxy mode** (default; all desktop OSes): xray exposes local SOCKS5 + HTTP listeners and `proxy.rs` enables a system-wide proxy via `gsettings` (Linux), the registry (Windows), or `networksetup` (macOS).
 - **TUN mode** (Linux): a dedicated `rustvpn-helper` (invoked via `pkexec`) creates a TUN interface and runs hev-socks5-tunnel to convert TUN packets into SOCKS5 traffic. Required for full system VPN behaviour when the system proxy alone is insufficient.
 
-On Android, a custom `tauri-plugin-vpn` runs xray inside an Android `VpnService` with hev-socks5-tunnel attached to the OS-provided TUN file descriptor (see [Android Architecture](#android-architecture) below).
-
 ```mermaid
 graph TD
     subgraph Desktop App [Tauri Desktop App]
@@ -78,73 +76,15 @@ graph TD
     XM -->|poll stats| STATS
 ```
 
-## Android Architecture
-
-On Android, the desktop sidecar approach is replaced by a VPN service with TUN-based packet routing.
-
-```
-User Apps
-    ↓ (all traffic intercepted by Android VPN API)
-┌──────────────────────────────┐
-│  TUN Device (10.0.0.2/30)   │  ← created by RustVpnService via VpnService.Builder
-└──────────────────────────────┘
-    ↓ (raw IP packets via file descriptor)
-┌──────────────────────────────┐
-│  hev-socks5-tunnel (libhev)  │  ← reads TUN FD, converts to SOCKS5
-│  Loaded via JNI dlopen       │
-└──────────────────────────────┘
-    ↓ (SOCKS5 TCP/UDP → 127.0.0.1:10808)
-┌──────────────────────────────┐
-│  xray-core (libxray)         │  ← SOCKS5 inbound → VLESS+REALITY outbound
-│  Launched via Runtime.exec() │
-└──────────────────────────────┘
-    ↓ (encrypted VLESS over TCP)
-┌──────────────────────────────┐
-│  VPN Server (VDS)            │
-└──────────────────────────────┘
-```
-
-### Key Android Components
-
-| File | Responsibility |
-|------|---------------|
-| `tauri-plugin-vpn/android/.../RustVpnService.kt` | Android `VpnService` — creates TUN, launches xray and hev, manages lifecycle |
-| `tauri-plugin-vpn/android/.../VpnPlugin.kt` | Tauri plugin bridge — handles VPN permission, starts/stops service, queries stats |
-| `tauri-plugin-vpn/android/.../HevTunnel.kt` | Kotlin JNI wrapper — loads libhev.so via dlopen, runs tunnel in pthread |
-| `tauri-plugin-vpn/android/.../cpp/hev_jni.c` | C JNI library — dlopen/dlsym wrapper for hev-socks5-tunnel shared library |
-| `tauri-plugin-vpn/src/mobile.rs` | Rust plugin interface for Android (calls Kotlin via Tauri mobile plugin API) |
-| `src-tauri/src/config.rs` | `modify_config_for_android()` — adds `sockopt.mark`, removes HTTP inbound |
-
-### Why JNI dlopen (not fork/exec)?
-
-The pre-built `hev-socks5-tunnel` binary from GitHub releases is a Linux/glibc executable that **cannot run on Android** (which uses bionic libc). The previous fork/exec approach silently failed with exit code 127. Instead, hev-socks5-tunnel is compiled from source using NDK to produce an Android shared library (`libhev.so`). The JNI wrapper (`libhevjni.so`) loads it at runtime via `dlopen()`, resolves the `hev_socks5_tunnel_main_from_file` and `hev_socks5_tunnel_quit` symbols, and runs the tunnel in a pthread. The TUN file descriptor is passed via the hev YAML config `fd:` parameter.
-
-### Routing Loop Prevention
-
-`addRoute("0.0.0.0", 0)` routes all traffic through the TUN, including xray's own connection to the VPN server. On Android, `sockopt.mark` does **not** bypass VPN routing (unlike Linux iptables). Instead, `addDisallowedApplication(packageName)` excludes the app's UID from VPN routing. Since xray and hev run as child processes with the same UID, their network traffic bypasses the TUN. hev still reads the TUN FD directly (file descriptor access, not network routing), so it is unaffected.
-
-### Android Binary Dependencies
-
-| Binary | Config name | Source | Purpose |
-|--------|-----------|--------|---------|
-| `libxray.so` | xray-core | [XTLS/Xray-core releases](https://github.com/XTLS/Xray-core/releases) | VLESS+REALITY proxy engine |
-| `libhev.so` | hev-socks5-tunnel | Built from source via NDK ([heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)) | TUN → SOCKS5 packet converter |
-| `libhevjni.so` | — | Compiled from `cpp/hev_jni.c` via NDK/CMake | JNI dlopen wrapper for libhev.so |
-
-Binaries are placed in `tauri-plugin-vpn/android/src/main/jniLibs/arm64-v8a/` (xray, hev) and compiled automatically (hevjni).
-
-## Module Structure
-
-### Rust Backend (`src-tauri/src/`)
 
 | File | Responsibility |
 |------|---------------|
 | `main.rs` | Entry point; calls `rustvpn_lib::run()` |
-| `lib.rs` | Tauri builder setup: registers plugins, manages `XrayManager` state, hooks startup recovery (stale TUN cleanup, system-proxy reset, auto-connect, Android `adopt_running_state`), registers all IPC commands |
+| `lib.rs` | Tauri builder setup: registers plugins, manages `XrayManager` state, hooks startup recovery (stale TUN cleanup, system-proxy reset, auto-connect), registers all IPC commands |
 | `models.rs` | Core data types: `ServerConfig`, `RealitySettings`, `ConnectionInfo`, `ConnectionStatus`, `SpeedStats`, `LogEntry`, `AppSettings`, `DetectedVpn`, `AppError` |
 | `commands.rs` | All `#[tauri::command]` handlers — connection, server CRUD, import/export, settings, logs, speed stats, bypass-domain reload, battery-optimization helpers, VPN detection |
 | `xray.rs` | `XrayManager` struct — spawns/kills xray sidecar, polls StatsService, buffers logs, drives system proxy + TUN startup, emits `connection-status-changed` events |
-| `config.rs` | `generate_client_config()` builds the xray JSON config (proxy or TUN flavour); `modify_config_for_android()` post-processes for the mobile build |
+| `config.rs` | `generate_client_config()` builds the xray JSON config (proxy or TUN flavour) |
 | `network.rs` | `detect_vpn_routes()` — detects corporate VPN interfaces/subnets via `ip -j route show`; `collect_bypass_subnets()` flattens results; `detect_default_gateway_and_ip()` for TUN setup; corporate-VPN DNS scrape from `/etc/resolv.conf` |
 | `proxy.rs` _(desktop)_ | `enable_system_proxy()` / `disable_system_proxy()` / `reset_stale_system_proxy()` — Linux (`gsettings`), Windows (registry), macOS (`networksetup`) |
 | `tun.rs` _(Linux)_ | `start_tun()` / `stop_tun()` / `cleanup_stale_tun()` — talks to `rustvpn-helper` via `pkexec` to create the `rvpn0` TUN device, run `hev-socks5-tunnel`, and add `ip rule` / `ip route` entries |
@@ -173,7 +113,6 @@ Binaries are placed in `tauri-plugin-vpn/android/src/main/jniLibs/arm64-v8a/` (x
 | `src/lib/components/UriInputModal.svelte` | Modal text area for pasting a vless:// URI |
 | `src/lib/components/SpeedGraph.svelte` | Sparkline of upload/download speed driven by `get_speed_stats` polling |
 | `src/lib/components/LogViewer.svelte` | Tail of xray logs from the in-memory buffer |
-| `src/lib/components/BackgroundModeModal.svelte` | Mobile prompt to grant battery-optimization exemption / open OEM auto-launch settings |
 | `src/lib/components/ThemeToggle.svelte` | Light/dark toggle |
 | `src/lib/components/ui/` | shadcn-svelte primitives (button, dialog, input, ...) |
 | `src/lib/utils/index.ts` | `cn()` helper — `clsx` + `tailwind-merge` |
@@ -284,16 +223,6 @@ All commands are registered in `src-tauri/src/lib.rs` via `tauri::generate_handl
 | `get_logs` | `commands::get_logs` | _(none)_ | `Result<Vec<LogEntry>, String>` |
 | `clear_logs` | `commands::clear_logs` | _(none)_ | `Result<(), String>` |
 
-### Mobile Background-Mode Commands
-
-These exist on every platform but are no-ops on desktop (Doze and OEM auto-launch policies are mobile-only).
-
-| Command name | Rust handler | Parameters | Return type |
-|---|---|---|---|
-| `is_battery_optimization_ignored` | `commands::is_battery_optimization_ignored` | _(none)_ | `Result<bool, String>` |
-| `request_ignore_battery_optimization` | `commands::request_ignore_battery_optimization` | _(none)_ | `Result<bool, String>` |
-| `open_oem_background_settings` | `commands::open_oem_background_settings` | _(none)_ | `Result<OemSettingsResult, String>` |
-
 ## State Management
 
 ### Rust: `XrayManager` (`src-tauri/src/xray.rs`)
@@ -328,7 +257,7 @@ A background async task (spawned via `tauri::async_runtime::spawn`) monitors xra
 
 1. **Stale TUN cleanup** (Linux only) — `tun::cleanup_stale_tun()` removes a leftover `rvpn0` device and its `ip rule` entries from a previous crash.
 2. **System-proxy reset** (desktop) — `proxy::reset_stale_system_proxy()` clears any system-proxy setting still pointing at our local ports, otherwise apps would briefly hit a dead listener while the new session starts.
-3. **Auto-connect** — if `AppSettings.auto_connect` is true and a `last_server_id` is saved, the manager calls `start()` for that server. On Android, a still-running `VpnService` from a swiped-away session is adopted via `XrayManager::adopt_running_state()` instead of being restarted.
+3. **Auto-connect** — if `AppSettings.auto_connect` is true and a `last_server_id` is saved, the manager calls `start()` for that server.
 
 #### System tray and hide-to-tray
 
