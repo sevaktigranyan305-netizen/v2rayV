@@ -13,7 +13,10 @@
 set -euo pipefail
 
 XRAY_VERSION="${1:-v0.0.14-test}"
-BINARIES_DIR="$(cd "$(dirname "$0")/../src-tauri/binaries" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+BINARIES_DIR="${SCRIPT_DIR}/../src-tauri/binaries"
+mkdir -p "${BINARIES_DIR}"
+BINARIES_DIR="$(cd "${BINARIES_DIR}" && pwd)"
 BASE_URL="https://github.com/sevaktigranyan305-netizen/Xray-core/releases/download/${XRAY_VERSION}"
 
 # Detect OS
