@@ -68,10 +68,11 @@ function createConnectionStore() {
 	}
 
 	async function connectVpn(config: ServerConfig) {
-		// Guard against double-click: refuse to start a second connect/disconnect
-		// while one is already in flight. Without this, two racing promises both
-		// mutate `info` and the UI ends up out of sync with the backend.
-		if (isLoading) return;
+		// Guard against double-click while a transition is in flight. Use the
+		// observed status (driven by the poll loop) rather than the in-flight
+		// `isLoading` flag, so a stale lingering `isLoading=true` after the
+		// backend has already settled doesn't lock the UI.
+		if (info.status === 'connecting' || info.status === 'disconnecting') return;
 		isLoading = true;
 		info = { ...info, status: 'connecting', error_message: null };
 		try {
@@ -90,7 +91,7 @@ function createConnectionStore() {
 	}
 
 	async function disconnectVpn() {
-		if (isLoading) return;
+		if (info.status === 'disconnecting') return;
 		isLoading = true;
 		info = { ...info, status: 'disconnecting' };
 		try {
