@@ -26,19 +26,28 @@ sudo pacman -S webkit2gtk-4.1 gtk3 libayatana-appindicator librsvg polkit
 
 Refer to the [official Tauri prerequisites](https://tauri.app/start/prerequisites/) for macOS and Windows.
 
-### TUN mode helper (Linux only, optional)
+### Privileges per platform
 
-For the full system-VPN experience on Linux, v2rayV runs `hev-socks5-tunnel` as root via a small privileged helper (`v2rayv-helper`) launched through `pkexec`. Install the helper and its polkit rule once:
+| Platform | What needs privileges                          | How v2rayV handles it                                                                                  |
+| -------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| Windows  | `WintunCreateAdapter()` for L3 mode             | The `.exe` embeds a UAC manifest (`src-tauri/manifest.xml`) declaring `requireAdministrator`. UAC prompt fires on every launch. For `pnpm tauri dev`, run the terminal as Administrator. |
+| macOS    | utun in L3 mode                                 | Run with `sudo` for now, or wire up your own privileged helper. Not yet smoothed out.                   |
+| Linux    | Native TUN in L3 mode                           | Either give xray `CAP_NET_ADMIN`, or stay in legacy SOCKS-only mode.                                    |
+| Linux    | Legacy SOCKS+TUN via `hev-socks5-tunnel`        | `sudo ./scripts/install-helper.sh` installs `/usr/local/sbin/v2rayv-helper` + a polkit rule, invoked via `pkexec` at runtime. |
+
+Legacy Linux helper install (only needed if you want SOCKS-mode TUN; L3 mode does not use this path):
 
 ```bash
 sudo ./scripts/install-helper.sh
 ```
 
-This places `/usr/local/sbin/v2rayv-helper` and the policy file from `polkit/`. Without it, the app falls back to system-proxy mode (works for most apps, but not every TCP/UDP source).
+This places `/usr/local/sbin/v2rayv-helper` and the policy file from `polkit/`. Without it, the app stays in plain system-proxy mode (works for most apps, but not every TCP/UDP source).
 
-### xray-core binary (required at runtime)
+### xray-core fork binary (required at runtime)
 
-The xray binary is not committed to version control. It must be placed at:
+v2rayV uses a [forked xray-core](https://github.com/sevaktigranyan305-netizen/Xray-core) that adds the `vless/l3client` outbound device backends (`device_windows.go` for wintun, `device_darwin.go` for utun, `device_linux.go` for native TUN). Upstream xray-core does not have those.
+
+The binary is not committed. It must be placed at:
 
 ```
 src-tauri/binaries/xray-<target-triple>
@@ -50,7 +59,14 @@ where `<target-triple>` is your platform identifier, for example:
 - macOS Apple Silicon: `xray-aarch64-apple-darwin`
 - Windows x86_64: `xray-x86_64-pc-windows-msvc.exe`
 
-Download the appropriate release from [XTLS/Xray-core releases](https://github.com/XTLS/Xray-core/releases).
+The convenient way is to use the bundled downloader, which pulls from [our fork's Releases](https://github.com/sevaktigranyan305-netizen/Xray-core/releases) and saves with the correct sidecar suffix:
+
+```bash
+./scripts/download-xray.sh                  # Pinned default version
+./scripts/download-xray.sh v0.0.14-test     # Specific tag
+```
+
+On Windows the release zip also contains `wintun.dll`, which the script places under `src-tauri/binaries/`. Tauri then bundles it as a Windows resource; at runtime `lib.rs::ensure_wintun_next_to_exe()` copies it next to the running `.exe` so the loader can find it.
 
 ## Clone and Run
 
@@ -66,6 +82,27 @@ pnpm tauri dev
 ```
 
 `pnpm tauri dev` runs `pnpm dev` (Vite dev server on http://localhost:5173) and the Tauri Rust backend concurrently. The app window connects to the Vite dev server for hot module reload.
+
+**Windows note**: dev mode must be launched from an elevated terminal (`Run as administrator`), otherwise wintun adapter creation will fail with `ERROR_ACCESS_DENIED` whenever you connect to a vnet=1 server. Production installer-installed builds prompt for UAC automatically via the embedded manifest.
+
+## Releases
+
+The version is duplicated in three files — they must match before tagging:
+
+```
+package.json                    "version": "x.y.z"
+src-tauri/Cargo.toml            version = "x.y.z"
+src-tauri/tauri.conf.json       "version": "x.y.z"
+```
+
+Then:
+
+```bash
+git tag vX.Y.Z
+git push --tags
+```
+
+`release.yml` builds and uploads `.msi` / `.exe` / `.dmg` / `.AppImage` / `.deb` artifacts to the new GitHub Release.
 
 ## Available Commands
 
@@ -114,11 +151,14 @@ v2rayV/
 │   │   ├── xray.rs               # XrayManager: sidecar lifecycle, stats poller, log buffer
 │   │   ├── config.rs             # generate_client_config()
 │   │   ├── network.rs            # Corporate VPN detection (ip -j route show), DNS scrape
-│   │   ├── proxy.rs              # System proxy enable/disable (Linux/Win/macOS) — desktop only
-│   │   ├── tun.rs                # Linux TUN mode via v2rayv-helper / pkexec
+│   │   ├── proxy.rs              # System proxy enable/disable (Linux/Win/macOS) — desktop only, legacy mode
+│   │   ├── tun.rs                # Linux TUN mode via v2rayv-helper / pkexec — legacy mode only
 │   │   ├── tray.rs               # System tray menu (desktop only)
-│   │   ├── storage.rs            # Load/save servers.json + settings.json
-│   │   └── uri.rs                # VLESS URI parse and serialize
+│   │   ├── storage.rs            # Load/save servers.json + subscriptions.json + settings.json
+│   │   ├── subscription.rs       # HTTPS fetch + base64 decode + per-line vless:// parsing
+│   │   └── uri.rs                # VLESS URI parse and serialize (incl. vnet= params)
+│   ├── manifest.xml              # Windows UAC manifest (requireAdministrator)
+│   ├── build.rs                  # Tauri build script + Windows manifest embedding
 │   ├── binaries/
 │   │   └── xray-<triple>         # xray-core binary (gitignored)
 │   ├── icons/                    # App icons for all platforms
@@ -142,20 +182,22 @@ v2rayV/
 │   │   ├── types/
 │   │   │   └── index.ts          # TypeScript interfaces (mirrors Rust structs)
 │   │   ├── stores/
-│   │   │   ├── connection.svelte.ts  # Connection state, polling, speed stats
-│   │   │   ├── servers.svelte.ts     # Server CRUD + selection + import/export
-│   │   │   └── settings.svelte.ts    # AppSettings with rollback-on-save-failure
+│   │   │   ├── connection.svelte.ts      # Connection state, polling, speed stats, 8 s disconnect watchdog
+│   │   │   ├── servers.svelte.ts         # Server CRUD + selection + import/export
+│   │   │   ├── subscriptions.svelte.ts   # Subscription list + add/refresh/delete
+│   │   │   └── settings.svelte.ts        # AppSettings with rollback-on-save-failure
 │   │   ├── components/
 │   │   │   ├── ConnectButton.svelte
 │   │   │   ├── StatusDisplay.svelte
-│   │   │   ├── ServerList.svelte
+│   │   │   ├── ServerList.svelte             # Manually-added servers only
 │   │   │   ├── ServerForm.svelte
-│   │   │   ├── ImportExportBar.svelte
+│   │   │   ├── SubscriptionList.svelte       # Saved subscriptions + nested servers + 25 s refresh watchdog
+│   │   │   ├── SubscriptionModal.svelte      # Add subscription form (autofill suppressed)
+│   │   │   ├── ImportExportBar.svelte        # Top-right header toolbar
 │   │   │   ├── UriInputModal.svelte
-│   │   │   ├── SpeedGraph.svelte         # Upload/download sparkline
-│   │   │   ├── LogViewer.svelte          # Tail of in-memory log buffer
+│   │   │   ├── LogViewer.svelte              # Tail of in-memory log buffer + Copy button
 │   │   │   ├── ThemeToggle.svelte
-│   │   │   └── ui/                       # shadcn-svelte primitives
+│   │   │   └── ui/                           # shadcn-svelte primitives
 │   │   ├── hooks/                # (reserved)
 │   │   ├── assets/
 │   │   │   └── favicon.svg
@@ -214,16 +256,21 @@ The generated xray JSON config is written to:
 
 On Linux this is typically `~/.local/share/com.v2rayv.app/xray_config.json`. The file is deleted on disconnect.
 
-### Server list and settings storage
+### Server list, subscriptions and settings storage
 
-Two JSON files are persisted in the OS app config directory:
+Three JSON files are persisted in the OS app config directory:
 
 ```
-<app_config_dir>/servers.json   # Vec<ServerConfig>
-<app_config_dir>/settings.json  # AppSettings (auto_connect, last_server_id, bypass_domains)
+<app_config_dir>/servers.json         # Vec<ServerConfig> (each carries optional virtualnet + subscription_id)
+<app_config_dir>/subscriptions.json   # Vec<Subscription> (id, name, url, last_updated_at, last_server_count)
+<app_config_dir>/settings.json        # AppSettings (auto_connect, last_server_id, bypass_domains)
 ```
 
-On Linux: `~/.config/com.v2rayv.app/`. On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id`.
+On Linux: `~/.config/com.v2rayv.app/`. On Windows: `%APPDATA%\com.v2rayv.app\`. All files are written with mode 0600 on Unix.
+
+On startup, `lib.rs` reads `settings.json` and, if `auto_connect` is true, immediately reconnects to `last_server_id`.
+
+All storage I/O in async commands is wrapped in `tauri::async_runtime::spawn_blocking` so file writes (which can be slow on Windows under AV scanning) don't block the IPC worker thread.
 
 ### Hide-to-tray and auto-connect
 

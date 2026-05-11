@@ -14,14 +14,33 @@ export interface RealitySettings {
   fingerprint: string;  // TLS fingerprint (e.g. "chrome")
 }
 
+export interface VirtualNetSettings {
+  enabled: boolean;
+  subnet: string;                  // CIDR like "10.10.0.0/24" (IPv4 only)
+  vnet_ip: string;                 // Pre-allocated per-uuid IPv4 from the panel (e.g. "10.10.0.5")
+  default_route: boolean;          // Route 0.0.0.0/0 through the TUN; mirrors vnetDefaultRoute=1
+  interface_name: string | null;   // Defaults to "v2rayV" inside xray-core
+  mtu: number | null;              // 0/null = let xray-core pick
+}
+
 export interface ServerConfig {
-  id: string;               // UUID v4 (generated internally, not the VLESS user UUID)
-  name: string;             // Display name (optional, defaults to address)
-  address: string;          // Server IP or hostname
-  port: number;             // Server port (1–65535)
-  uuid: string;             // VLESS user UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
-  flow: string;             // XTLS flow (e.g. "xtls-rprx-vision")
+  id: string;                              // UUID v4 (generated internally, not the VLESS user UUID)
+  name: string;                            // Display name (optional, defaults to address)
+  address: string;                         // Server IP or hostname
+  port: number;                            // Server port (1–65535)
+  uuid: string;                            // VLESS user UUID (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)
+  flow: string;                            // XTLS flow (e.g. "xtls-rprx-vision")
   reality: RealitySettings;
+  virtualnet: VirtualNetSettings | null;   // L3 mode hints from vnet=/vnetIp= URI params
+  subscription_id: string | null;          // Set if this server came from a saved subscription
+}
+
+export interface Subscription {
+  id: string;                          // UUID v4
+  name: string;                        // User-chosen display name
+  url: string;                         // HTTPS subscription URL
+  last_updated_at: number | null;      // Unix-seconds of the last successful refresh
+  last_server_count: number | null;    // Number of servers the last refresh produced
 }
 
 export interface DetectedVpn {
@@ -68,6 +87,88 @@ export interface AppSettings {
 
 ---
 
+## Subscription Commands
+
+Subscriptions are saved to `subscriptions.json` (mode 0600). Each `ServerConfig` produced from a subscription is tagged with the subscription's id via `subscription_id`. `refresh_subscription` re-fetches the URL and atomically replaces only the servers belonging to that subscription.
+
+### `list_subscriptions`
+
+**Rust signature:**
+```rust
+pub fn list_subscriptions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Subscription>, String>
+```
+
+**TypeScript wrapper:**
+```typescript
+export async function listSubscriptions(): Promise<Subscription[]>
+```
+
+### `add_subscription`
+
+Fetch + parse + save in one go.
+
+**Rust signature:**
+```rust
+pub async fn add_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    name: String,
+    url: String,
+) -> Result<Subscription, String>
+```
+
+**TypeScript wrapper:**
+```typescript
+export async function addSubscription(name: string, url: string): Promise<Subscription>
+```
+
+**Behavior:** HTTPS-fetches the URL, base64-decodes (or treats as plaintext) the body, splits into `vless://` lines, parses each with `uri::parse_vless_uri`, tags every parsed server with the new subscription's id, atomically writes both `subscriptions.json` and `servers.json`. All file I/O runs inside `tauri::async_runtime::spawn_blocking`.
+
+**Error cases:** network errors from the fetch, base64 decode errors, per-line URI parse errors (each is collected; the command fails only if zero servers parsed successfully).
+
+### `refresh_subscription`
+
+Re-fetch a saved subscription and replace its servers.
+
+**Rust signature:**
+```rust
+pub async fn refresh_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<(Subscription, Vec<ServerConfig>), String>
+```
+
+**TypeScript wrapper:**
+```typescript
+export async function refreshSubscription(id: string): Promise<{
+    subscription: Subscription;
+    servers: ServerConfig[];
+}>
+```
+
+**Behavior:** re-fetches the saved URL, drops every `ServerConfig` whose `subscription_id == id`, appends the freshly-parsed (and re-tagged) servers, bumps `last_updated_at` (Unix seconds) and `last_server_count` on the subscription. Manually-added servers (`subscription_id == None`) and servers from other subscriptions are not touched. Returns the updated subscription and the *new* server list belonging to it.
+
+**Frontend mitigation:** `SubscriptionList.svelte` races the IPC against a 25 s watchdog; on timeout it manually reloads the subscriptions and servers stores so the UI converges with the on-disk state even if the IPC reply stalls (observed under Parallels x86_64 emulation).
+
+### `delete_subscription`
+
+**Rust signature:**
+```rust
+pub fn delete_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    delete_servers: bool,
+) -> Result<(), String>
+```
+
+**TypeScript wrapper:**
+```typescript
+export async function deleteSubscription(id: string, deleteServers: boolean): Promise<void>
+```
+
+**Behavior:** removes the subscription entry. If `delete_servers == true`, also removes every `ServerConfig` whose `subscription_id == id`. Both writes are atomic.
+
+---
+
 ## Connection Commands
 
 ### `connect`
@@ -104,7 +205,7 @@ export async function connect(config: ServerConfig): Promise<void>
 - `"Failed to create sidecar command: ..."` — xray binary not found in bundles
 - `"Failed to spawn xray: ..."` — OS process spawn failure
 
-**Behavior:** Sets status to `connecting`, generates the xray JSON config, writes it to disk, and spawns xray. Status transitions to `connected` asynchronously when xray logs `"started"` to stderr.
+**Behavior:** Sets status to `connecting`. If `serverConfig.virtualnet` is `Some(VirtualNetSettings { enabled: true, .. })`, generates an L3 config (no SOCKS/HTTP inbound, only a VLESS+REALITY outbound with a `virtualNetwork{}` block) and skips system-proxy / `hev-socks5-tunnel` setup. Otherwise generates the legacy proxy/TUN config. In both cases writes the config to disk and spawns xray. Status transitions to `connected` asynchronously when xray's stderr matches `"started"`, `"core: Xray "`, or `"virtualNetwork: l3client created"`. A 6 s fallback timer also flips the state if any output has been observed; a 15 s hard timeout fires for genuinely stuck launches.
 
 ---
 
@@ -128,7 +229,9 @@ export async function disconnect(): Promise<void>
 **Error cases:**
 - `"Failed to kill xray: ..."` — OS-level kill failure (rare)
 
-**Behavior:** Sets status to `disconnecting`, sends SIGKILL to xray child process, deletes the temp config file, sets status to `disconnected`.
+**Behavior:** Sets status to `disconnecting`, hard-kills xray via `child.kill()` (`TerminateProcess` on Windows, `SIGKILL` on Unix), deletes the temp config file, sets status to `disconnected`. In L3 mode, `proxy::disable_system_proxy()` and `tun::stop_tun()` are skipped (we never enabled them).
+
+**Frontend mitigation:** `connection.svelte.ts disconnectVpn()` arms an 8 s watchdog and optimistically flips the UI to `disconnecting`. If the IPC reply lags, the watchdog fires and the store flips `status = disconnected` itself. The 1 Hz `get_connection_info` poll loop confirms.
 
 ---
 

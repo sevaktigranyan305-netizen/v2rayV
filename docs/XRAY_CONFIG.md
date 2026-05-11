@@ -47,8 +47,9 @@ pub fn generate_client_config(
 
 ### Mode selection
 
-- **Proxy-only mode** (`send_through == None`): xray exposes SOCKS5 + HTTP locally, and the OS-level proxy (`gsettings` / Windows registry / `networksetup`) is pointed at it by `proxy.rs`. DNS leads with `localhost` so corporate hostnames resolve via the system resolver.
-- **TUN mode** (Linux only, `send_through == Some(ip)`): hev-socks5-tunnel converts the TUN device to SOCKS5 traffic; `localhost` is dropped from `dns.servers` to avoid blocking on `getaddrinfo()` over a corporate-VPN-pushed resolver. Outbounds get `sendThrough` and a `direct-vpn` companion outbound is added when `bypass_subnets` is non-empty.
+- **L3 (virtualnet) mode** (preferred). Selected when `server.virtualnet.is_some()` (i.e. the URI carried `vnet=1&vnetIp=...`). `config::generate_l3_config(server)` produces a config with no inbounds at all and a single VLESS+REALITY outbound carrying a `virtualNetwork{}` block. The xray-core fork's `vless/l3client` opens a TUN device itself — wintun on Windows, utun on macOS, native TUN on Linux. v2rayV does not enable a system proxy and does not run `hev-socks5-tunnel`.
+- **Proxy-only mode** (legacy fallback, `send_through == None`): xray exposes SOCKS5 + HTTP locally, and the OS-level proxy (`gsettings` / Windows registry / `networksetup`) is pointed at it by `proxy.rs`. DNS leads with `localhost` so corporate hostnames resolve via the system resolver.
+- **Linux TUN mode** (legacy fallback, `send_through == Some(ip)`): hev-socks5-tunnel converts the TUN device to SOCKS5 traffic; `localhost` is dropped from `dns.servers` to avoid blocking on `getaddrinfo()` over a corporate-VPN-pushed resolver. Outbounds get `sendThrough` and a `direct-vpn` companion outbound is added when `bypass_subnets` is non-empty.
 
 ### Full client config (TUN mode example)
 
@@ -235,6 +236,59 @@ xray x25519
 # Public key:  <share with clients>
 ```
 
+## L3 (virtualnet) Mode Config
+
+When `server.virtualnet` is `Some(VirtualNetSettings { enabled: true, .. })`, `config::generate_l3_config()` produces a much smaller xray config than the legacy mode. There are no inbounds, no DNS overrides, no routing rules — the xray-core fork's `l3client` makes all those decisions itself.
+
+Example for a server with `vnet_ip = "10.10.0.5"`, `subnet = "10.10.0.0/24"`, `default_route = true`:
+
+```json
+{
+  "log": { "loglevel": "info" },
+  "inbounds": [],
+  "outbounds": [
+    {
+      "tag": "proxy",
+      "protocol": "vless",
+      "settings": {
+        "vnext": [
+          {
+            "address": "45.151.233.107",
+            "port": 443,
+            "users": [
+              {
+                "id": "b472a988-1cd7-4221-b76f-9cea35f2df2f",
+                "flow": "xtls-rprx-vision",
+                "encryption": "none"
+              }
+            ]
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "serverName": "www.microsoft.com",
+          "fingerprint": "chrome",
+          "publicKey": "kieJgZYLW9ZiKbGLpKnv4XyVo6_42inSONJrr-96tUU",
+          "shortId": "d64736262cd50811"
+        }
+      },
+      "virtualNetwork": {
+        "enabled": true,
+        "subnet": "10.10.0.0/24",
+        "vnetIp": "10.10.0.5/24",
+        "defaultRoute": true,
+        "interfaceName": "v2rayV"
+      }
+    }
+  ]
+}
+```
+
+The shape of the `virtualNetwork` block matches what the [Xray-core fork's](https://github.com/sevaktigranyan305-netizen/Xray-core) `proxy/vless/l3client/device_*.go` reads. Adding fields here that are not understood by the fork is a no-op (xray-core warns and ignores them); removing required fields (`subnet`, `vnetIp`) makes adapter creation fail.
+
 ## SOCKS5 Proxy Port
 
 xray always listens on `127.0.0.1:10808` (hardcoded as `DEFAULT_SOCKS_PORT` in `xray.rs`). Configure applications to use this SOCKS5 proxy, or set it system-wide.
@@ -245,29 +299,52 @@ The vless:// URI is a shareable string encoding all parameters needed to configu
 
 ### Format specification
 
+Legacy mode (no `vnet=` params):
+
 ```
 vless://UUID@ADDRESS:PORT?encryption=none&flow=FLOW&type=tcp&security=reality&sni=SNI&fp=FINGERPRINT&pbk=PUBLIC_KEY&sid=SHORT_ID#NAME
 ```
 
-| Component | Description |
-|-----------|-------------|
-| `UUID` | User UUID (VLESS credential), format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
-| `ADDRESS` | Server IP address or hostname. IPv6 addresses are wrapped in brackets: `[::1]` |
-| `PORT` | Server port (1–65535) |
-| `encryption` | Always `none` for VLESS |
-| `flow` | XTLS flow control, typically `xtls-rprx-vision` |
-| `type` | Transport type, always `tcp` |
-| `security` | Always `reality` |
-| `sni` | TLS SNI (the legitimate domain to impersonate) |
-| `fp` | TLS fingerprint (`chrome`, `firefox`, `safari`, `edge`, etc.) |
-| `pbk` | Server's X25519 public key (Base64url) |
-| `sid` | Short ID (hex string, max 16 chars) |
-| `#NAME` | Human-readable server name (URL-encoded) |
+L3 (virtualnet) mode (additionally carries `vnet*` params):
 
-### Example URI
+```
+vless://UUID@ADDRESS:PORT?...&vnet=1&vnetIp=10.10.0.5/24&vnetSubnet=10.10.0.0/24&vnetDefaultRoute=1&vnetMtu=1420#NAME
+```
+
+| Component             | Description |
+|-----------------------|-------------|
+| `UUID`                | User UUID (VLESS credential), format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+| `ADDRESS`             | Server IP address or hostname. IPv6 addresses are wrapped in brackets: `[::1]` |
+| `PORT`                | Server port (1–65535) |
+| `encryption`          | Always `none` for VLESS |
+| `flow`                | XTLS flow control, typically `xtls-rprx-vision` |
+| `type`                | Transport type, always `tcp` |
+| `security`            | Always `reality` |
+| `sni`                 | TLS SNI (the legitimate domain to impersonate) |
+| `fp`                  | TLS fingerprint (`chrome`, `firefox`, `safari`, `edge`, etc.) |
+| `pbk`                 | Server's X25519 public key (Base64url) |
+| `sid`                 | Short ID (hex string, max 16 chars) |
+| `vnet`                | If `1`, enables L3 virtualnet mode (only takes effect if `vnetIp` is also non-empty) |
+| `vnetIp`              | Pre-allocated per-uuid IPv4 with a CIDR suffix (e.g. `10.10.0.5/24`). IPv4 only. |
+| `vnetSubnet`          | Subnet CIDR for the virtualnet (e.g. `10.10.0.0/24`). Falls back to deriving from `vnetIp` if absent. |
+| `vnetDefaultRoute`    | `1` to route 0.0.0.0/0 through the TUN, `0` to keep the existing default route. Default `1`. |
+| `vnetMtu`             | Optional MTU override; xray-core picks a sane default if absent or `0`. |
+| `#NAME`               | Human-readable server name (URL-encoded) |
+
+**Activation gating** (mirrors what `v2rayVN` does in `VlessFmt.kt`): L3 mode kicks in only if `vnet=1` AND `vnetIp` is non-empty. If either is missing or `vnet` has any other value, v2rayV falls back to legacy SOCKS+system-proxy mode for that server.
+
+### Example URIs
+
+Legacy:
 
 ```
 vless://b472a988-1cd7-4221-b76f-9cea35f2df2f@45.151.233.107:443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=www.microsoft.com&fp=chrome&pbk=kieJgZYLW9ZiKbGLpKnv4XyVo6_42inSONJrr-96tUU&sid=d64736262cd50811#Finland%20VDS
+```
+
+L3 (with vnet=1 + vnetIp):
+
+```
+vless://b472a988-1cd7-4221-b76f-9cea35f2df2f@45.151.233.107:443?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality&sni=www.microsoft.com&fp=chrome&pbk=kieJgZYLW9ZiKbGLpKnv4XyVo6_42inSONJrr-96tUU&sid=d64736262cd50811&vnet=1&vnetIp=10.10.0.5/24&vnetSubnet=10.10.0.0/24&vnetDefaultRoute=1#Finland%20VDS%20(L3)
 ```
 
 ### URI parsing behavior (`uri.rs`)
@@ -285,25 +362,21 @@ vless://b472a988-1cd7-4221-b76f-9cea35f2df2f@45.151.233.107:443?encryption=none&
 
 ## Adding a New Server
 
-### Method 1: Manual entry (via UI form)
+### Method 1: Save a subscription URL
 
-1. Click **+ Add** in the server list.
-2. Fill in the required fields:
-   - Address, Port, UUID
-   - REALITY: Public Key, Short ID, SNI, Fingerprint
-3. Click **Add Server**.
+1. Click **Import** → **Subscription URL** in the top-right header.
+2. Enter a name (free-form) and the HTTPS URL of a subscription endpoint (e.g. an [3x-ui](https://github.com/sevaktigranyan305-netizen/3x-ui) panel `sub` route).
+3. Click **Fetch & Save**.
 
-Required fields: `address`, `port` (1–65535), `uuid` (valid UUID format), `public_key`, `short_id`, `server_name`, `fingerprint`.
-
-The `flow` field defaults to `xtls-rprx-vision`. The `name` field defaults to the address if left blank.
+Every server returned by the URL is tagged with the new subscription's id. Use **Refresh** in the subscription header to re-fetch (replacing only that subscription's servers); use **Delete** to drop the subscription (with an option to keep or delete its servers).
 
 ### Method 2: Import from vless:// URI
 
 1. Click **Import** → **From vless:// URI**.
-2. Paste the full `vless://...` URI.
+2. Paste the full `vless://...` URI (with or without `vnet=` params).
 3. Click **Import**.
 
-The URI is parsed on the Rust side (`parse_vless_uri_cmd`), validated, and stored.
+The URI is parsed on the Rust side (`parse_vless_uri_cmd`), validated, and stored as a manual server (no `subscription_id`).
 
 ### Method 3: Import from JSON file
 
