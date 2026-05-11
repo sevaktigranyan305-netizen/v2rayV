@@ -3,13 +3,11 @@
 [![Release](https://img.shields.io/github/v/release/sevaktigranyan305-netizen/v2rayV?display_name=tag)](https://github.com/sevaktigranyan305-netizen/v2rayV/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cross-platform desktop VPN client for the **VLESS + REALITY** protocol — currently the most DPI-resistant tunneling method, achieving a ~99.5% bypass rate against Russian TSPU deep packet inspection. Built with **Tauri v2**, **Svelte 5**, and a fork of **xray-core**.
-
-v2rayV mimics normal HTTPS traffic to sites like `microsoft.com`, making VPN connections invisible to traffic analysis. Pair it with the [3x-ui fork](https://github.com/sevaktigranyan305-netizen/3x-ui) on the server side and the Android client [v2rayVN](https://github.com/sevaktigranyan305-netizen/v2rayNG) on phones.
+Cross-platform desktop VPN client for my xray-core fork. Built with **Tauri v2**, **Svelte 5**, and a fork of **xray-core**.
 
 ---
 
-## Two operating modes
+## Two operation modes
 
 v2rayV picks the operating mode automatically from the share-link the user imports. There is no UI toggle — the URI tells the client what to do.
 
@@ -23,6 +21,7 @@ The share-link contains `vnet=1&vnetIp=10.10.0.5/24` (and optionally `vnetSubnet
 - The panel-allocated `vnetIp` is bound to the adapter so per-device usage is visible in [3x-ui](https://github.com/sevaktigranyan305-netizen/3x-ui).
 
 ### Legacy SOCKS + system-proxy mode
+not sure about this socks one, devin didnt touched this at all i think
 The share-link does not contain `vnet=1` (or `vnetIp` is empty). v2rayV falls back to:
 
 - xray-core exposes SOCKS5 on `127.0.0.1:10808` and HTTP on `127.0.0.1:10809`.
