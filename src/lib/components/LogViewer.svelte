@@ -9,6 +9,8 @@
 	let pollInterval: ReturnType<typeof setInterval> | null = null;
 	let scrollContainer: HTMLDivElement;
 	let fetchError = $state<string | null>(null);
+	let copyState = $state<'idle' | 'copied' | 'error'>('idle');
+	let copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
 	const filteredLogs = $derived(
 		search.trim()
@@ -37,6 +39,34 @@
 			fetchError = null;
 		} catch (err) {
 			fetchError = err instanceof Error ? err.message : String(err);
+		}
+	}
+
+	function flashCopyState(state: 'copied' | 'error') {
+		copyState = state;
+		if (copyResetTimer !== null) {
+			clearTimeout(copyResetTimer);
+		}
+		copyResetTimer = setTimeout(() => {
+			copyState = 'idle';
+			copyResetTimer = null;
+		}, 1500);
+	}
+
+	async function handleCopy() {
+		// Copy whatever the user is currently looking at: if there's an
+		// active search filter the copy mirrors what's on screen, otherwise
+		// it copies the full log buffer.
+		const lines = filteredLogs.map((entry) => {
+			const ts = new Date(entry.timestamp * 1000).toISOString();
+			return `${ts} ${entry.level.toUpperCase()} ${entry.message}`;
+		});
+		const text = lines.join('\n');
+		try {
+			await navigator.clipboard.writeText(text);
+			flashCopyState('copied');
+		} catch {
+			flashCopyState('error');
 		}
 	}
 
@@ -80,6 +110,9 @@
 		if (pollInterval !== null) {
 			clearInterval(pollInterval);
 		}
+		if (copyResetTimer !== null) {
+			clearTimeout(copyResetTimer);
+		}
 	});
 </script>
 
@@ -100,6 +133,14 @@
 			/>
 			Auto-scroll
 		</label>
+		<button
+			onclick={handleCopy}
+			disabled={filteredLogs.length === 0}
+			class="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-foreground rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+			title="Copy visible logs to clipboard"
+		>
+			{copyState === 'copied' ? 'Copied' : copyState === 'error' ? 'Copy failed' : 'Copy'}
+		</button>
 		<button
 			onclick={handleClear}
 			class="px-3 py-1.5 text-xs bg-zinc-700 hover:bg-zinc-600 text-foreground rounded-md transition-colors"

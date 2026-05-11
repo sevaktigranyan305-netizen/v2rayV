@@ -5,27 +5,26 @@
 
 	interface Props {
 		onEdit: (server: ServerConfig) => void;
-		onAdd: () => void;
 	}
 
-	const { onEdit, onAdd }: Props = $props();
+	const { onEdit }: Props = $props();
 
 	const store = serversStore;
+
+	// Subscription-owned servers are rendered (read-only) inside
+	// SubscriptionList — they don't get edit/delete buttons there because
+	// they're owned by the subscription. Here we only show servers added
+	// by hand so the buttons match the lifecycle.
+	const manualServers = $derived(store.servers.filter((s) => !s.subscription_id));
 </script>
 
+{#if manualServers.length > 0}
 <div class="w-full flex flex-col gap-1">
 	<div class="flex items-center justify-between mb-2">
 		<span class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Servers</span>
-		<button
-			onclick={onAdd}
-			class="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded hover:bg-accent"
-			aria-label="Add server"
-		>
-			+ Add
-		</button>
 	</div>
 
-	{#each store.servers as server (server.id)}
+	{#each manualServers as server (server.id)}
 		<div
 			class={cn(
 				'flex items-center justify-between rounded-lg px-3 py-2.5 border cursor-pointer transition-colors',
@@ -58,7 +57,7 @@
 					</svg>
 				</button>
 
-				{#if store.servers.length > 1}
+				{#if manualServers.length > 0}
 					<button
 						onclick={(e) => { e.stopPropagation(); store.deleteServer(server.id); }}
 						class="touch-target flex items-center justify-center rounded hover:bg-zinc-700 text-muted-foreground hover:text-destructive transition-colors"
@@ -77,3 +76,4 @@
 		</div>
 	{/each}
 </div>
+{/if}

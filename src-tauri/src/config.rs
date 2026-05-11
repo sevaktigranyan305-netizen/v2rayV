@@ -1,8 +1,18 @@
 use serde_json::{json, Value};
 
-use crate::models::{AppError, ServerConfig};
+use crate::models::{AppError, ServerConfig, VirtualNetSettings};
 
 pub const STATS_API_ADDR: &str = "127.0.0.1:10085";
+
+/// Returns Some(&VirtualNetSettings) if the server has L3 virtualnet
+/// enabled (vnet=1 + non-empty vnetIp). Used to gate the system-proxy /
+/// hev-socks5-tunnel paths in xray.rs as well as the config builder.
+pub fn virtualnet_enabled(server: &ServerConfig) -> Option<&VirtualNetSettings> {
+    server
+        .virtualnet
+        .as_ref()
+        .filter(|v| v.enabled && !v.vnet_ip.is_empty())
+}
 
 pub fn generate_client_config(
     server: &ServerConfig,
@@ -12,6 +22,15 @@ pub fn generate_client_config(
     send_through: Option<&str>,
     vpn_dns_servers: &[String],
 ) -> Result<String, AppError> {
+    // Forked xray-core's L3 (l3client) mode owns the TUN adapter
+    // directly — wintun on Windows, utun on macOS, native TUN on Linux —
+    // so we don't need a SOCKS/HTTP inbound, system proxy, hev-socks5
+    // shim, or routing rules. Just emit the VLESS outbound with the
+    // `virtualNetwork` block and let xray-core do everything.
+    if let Some(vn) = virtualnet_enabled(server) {
+        return generate_l3_config(server, vn);
+    }
+
     // In TUN mode, skip localhost DNS entirely. The system resolver calls getaddrinfo()
     // which goes through /etc/resolv.conf — corporate VPNs push their own DNS server
     // there, and in TUN mode that DNS traffic may be unroutable, causing a 30-second
@@ -274,6 +293,83 @@ pub fn generate_client_config(
     serde_json::to_string_pretty(&config).map_err(AppError::from)
 }
 
+/// Build a config for L3 (virtualnet) mode: no inbounds, no routing
+/// rules, no DNS overrides — just the VLESS outbound with a
+/// `virtualNetwork` block that the xray-core fork's `l3client` consumes
+/// to bring up the TUN adapter and route everything through it.
+fn generate_l3_config(server: &ServerConfig, vn: &VirtualNetSettings) -> Result<String, AppError> {
+    let mut virtualnet = json!({
+        "enabled": true,
+        "subnet": if vn.subnet.is_empty() { "10.0.0.0/24".to_string() } else { vn.subnet.clone() },
+        "vnetIp": vn.vnet_ip,
+        "defaultRoute": vn.default_route,
+    });
+    if let Some(ifname) = vn.interface_name.as_ref() {
+        if !ifname.is_empty() {
+            virtualnet["interfaceName"] = json!(ifname);
+        }
+    }
+    if let Some(mtu) = vn.mtu {
+        if mtu > 0 {
+            virtualnet["mtu"] = json!(mtu);
+        }
+    }
+
+    let config = json!({
+        "log": {
+            "loglevel": "info"
+        },
+        "stats": {},
+        "api": {
+            "tag": "api",
+            "listen": STATS_API_ADDR,
+            "services": ["StatsService"]
+        },
+        "policy": {
+            "system": {
+                "statsOutboundUplink": true,
+                "statsOutboundDownlink": true
+            }
+        },
+        "inbounds": [],
+        "outbounds": [
+            {
+                "tag": "proxy",
+                "protocol": "vless",
+                "settings": {
+                    "vnext": [
+                        {
+                            "address": server.address,
+                            "port": server.port,
+                            "users": [
+                                {
+                                    "id": server.uuid,
+                                    "flow": server.flow,
+                                    "encryption": "none"
+                                }
+                            ]
+                        }
+                    ],
+                    "virtualNetwork": virtualnet
+                },
+                "streamSettings": {
+                    "network": "tcp",
+                    "security": "reality",
+                    "realitySettings": {
+                        "show": false,
+                        "fingerprint": server.reality.fingerprint,
+                        "serverName": server.reality.server_name,
+                        "publicKey": server.reality.public_key,
+                        "shortId": server.reality.short_id
+                    }
+                }
+            }
+        ]
+    });
+
+    serde_json::to_string_pretty(&config).map_err(AppError::from)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +390,8 @@ mod tests {
                 server_name: "www.microsoft.com".to_string(),
                 fingerprint: "chrome".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         };
 
         let config_str = generate_client_config(&server, 10808, &[], &[], None, &[]).unwrap();
@@ -430,6 +528,8 @@ mod tests {
                 server_name: "example.com".to_string(),
                 fingerprint: "chrome".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         };
         let config_str = generate_client_config(&server, 10808, &[], &[], None, &[]).unwrap();
         let parsed: Result<Value, _> = serde_json::from_str(&config_str);
@@ -449,6 +549,8 @@ mod tests {
             uuid: "cafe0000-cafe-cafe-cafe-cafe00000000".to_string(),
             flow: "xtls-rprx-vision".to_string(),
             reality: RealitySettings::default(),
+            virtualnet: None,
+            subscription_id: None,
         };
         let config_str = generate_client_config(&server, 10808, &[], &[], None, &[]).unwrap();
         let config: Value = serde_json::from_str(&config_str).unwrap();
@@ -477,6 +579,8 @@ mod tests {
                 server_name: "www.cloudflare.com".to_string(),
                 fingerprint: "safari".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         };
         let config_str = generate_client_config(&server, 10808, &[], &[], None, &[]).unwrap();
         let config: Value = serde_json::from_str(&config_str).unwrap();
@@ -689,6 +793,8 @@ mod tests {
             uuid: "00000000-0000-0000-0000-000000000000".to_string(),
             flow: "xtls-rprx-vision".to_string(),
             reality: RealitySettings::default(),
+            virtualnet: None,
+            subscription_id: None,
         };
         let config_str = generate_client_config(&server, 10808, &[], &[], None, &[]).unwrap();
         let config: Value = serde_json::from_str(&config_str).unwrap();

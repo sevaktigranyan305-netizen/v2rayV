@@ -1,4 +1,4 @@
-use crate::models::{AppError, RealitySettings, ServerConfig};
+use crate::models::{AppError, RealitySettings, ServerConfig, VirtualNetSettings};
 
 pub fn parse_vless_uri(uri: &str) -> Result<ServerConfig, AppError> {
     // Format: vless://UUID@ADDRESS:PORT?params#NAME
@@ -62,6 +62,18 @@ pub fn parse_vless_uri(uri: &str) -> Result<ServerConfig, AppError> {
     let mut public_key = String::new();
     let mut short_id = String::new();
 
+    // L3 virtualnet hints from the 3x-ui fork. We mirror Android's gating
+    // (`vnet=1` AND a non-blank `vnetIp`) so a legacy share-link without
+    // `vnetIp` falls back to the SOCKS-inbound + system-proxy path
+    // instead of trying to bring up a TUN with no assigned address.
+    let mut vnet_enabled = false;
+    let mut vnet_subnet: Option<String> = None;
+    let mut vnet_ip: Option<String> = None;
+    // The panel forces `vnetDefaultRoute=1` whenever virtualNetwork is
+    // enabled, but we accept an explicit override and still default to
+    // true when the param is missing — same as Android's parser.
+    let mut vnet_default_route: Option<bool> = None;
+
     for param in query.split('&') {
         if param.is_empty() {
             continue;
@@ -73,10 +85,44 @@ pub fn parse_vless_uri(uri: &str) -> Result<ServerConfig, AppError> {
                 "fp" => fingerprint = url_decode(value),
                 "pbk" => public_key = url_decode(value),
                 "sid" => short_id = url_decode(value),
+                "vnet" => {
+                    vnet_enabled = matches!(url_decode(value).as_str(), "1" | "true");
+                }
+                "vnetSubnet" => {
+                    let v = url_decode(value);
+                    if is_valid_ipv4_cidr(&v) {
+                        vnet_subnet = Some(v);
+                    }
+                }
+                "vnetIp" => {
+                    let v = url_decode(value);
+                    if is_ipv4_literal(&v) {
+                        vnet_ip = Some(v);
+                    }
+                }
+                "vnetDefaultRoute" => {
+                    vnet_default_route = match url_decode(value).as_str() {
+                        "1" | "true" => Some(true),
+                        "0" | "false" => Some(false),
+                        _ => None,
+                    };
+                }
                 _ => {} // ignore unknown params (encryption, type, security, etc.)
             }
         }
     }
+
+    let virtualnet = match (vnet_enabled, vnet_ip.as_ref()) {
+        (true, Some(ip)) if !ip.is_empty() => Some(VirtualNetSettings {
+            enabled: true,
+            subnet: vnet_subnet.unwrap_or_else(|| "10.0.0.0/24".to_string()),
+            vnet_ip: ip.clone(),
+            default_route: vnet_default_route.unwrap_or(true),
+            interface_name: None,
+            mtu: None,
+        }),
+        _ => None,
+    };
 
     Ok(ServerConfig {
         id: uuid::Uuid::new_v4().to_string(),
@@ -91,13 +137,54 @@ pub fn parse_vless_uri(uri: &str) -> Result<ServerConfig, AppError> {
             server_name: sni,
             fingerprint,
         },
+        virtualnet,
+        subscription_id: None,
     })
+}
+
+/// Strict-ish IPv4 CIDR check: four octets 0-255 + "/0..32". Used to
+/// gate `vnetSubnet=` so a malformed value can't reach the xray config
+/// builder. IPv4-only by design — the xray-core fork's l3client and the
+/// 3x-ui IPAM are both IPv4-only.
+fn is_valid_ipv4_cidr(s: &str) -> bool {
+    let (addr, prefix) = match s.split_once('/') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    if !matches!(prefix.parse::<u8>(), Ok(n) if n <= 32) {
+        return false;
+    }
+    is_ipv4_literal(addr)
+}
+
+/// Strict IPv4 literal check (four 0-255 octets, no CIDR suffix).
+fn is_ipv4_literal(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('.').collect();
+    if parts.len() != 4 {
+        return false;
+    }
+    for p in parts {
+        if p.is_empty() || p.len() > 3 {
+            return false;
+        }
+        if !p.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        let n: u16 = match p.parse() {
+            Ok(n) => n,
+            Err(_) => return false,
+        };
+        if n > 255 {
+            return false;
+        }
+    }
+    true
 }
 
 pub fn to_vless_uri(server: &ServerConfig) -> String {
     let name = url_encode(&server.name);
-    format!(
-        "vless://{}@{}:{}?encryption=none&flow={}&type=tcp&security=reality&sni={}&fp={}&pbk={}&sid={}#{}",
+    let mut uri = format!(
+        "vless://{}@{}:{}?encryption=none&flow={}&type=tcp&security=reality&sni={}&fp={}&pbk={}&sid={}",
         server.uuid,
         server.address,
         server.port,
@@ -106,8 +193,32 @@ pub fn to_vless_uri(server: &ServerConfig) -> String {
         url_encode(&server.reality.fingerprint),
         url_encode(&server.reality.public_key),
         url_encode(&server.reality.short_id),
-        name,
-    )
+    );
+
+    // Round-trip the L3 virtualnet hints. Only emitted when virtualnet is
+    // enabled so legacy clients still see clean VLESS share-links.
+    if let Some(vn) = server.virtualnet.as_ref() {
+        if vn.enabled {
+            uri.push_str("&vnet=1");
+            if !vn.subnet.is_empty() {
+                uri.push_str("&vnetSubnet=");
+                uri.push_str(&url_encode(&vn.subnet));
+            }
+            if !vn.vnet_ip.is_empty() {
+                uri.push_str("&vnetIp=");
+                uri.push_str(&url_encode(&vn.vnet_ip));
+            }
+            uri.push_str(if vn.default_route {
+                "&vnetDefaultRoute=1"
+            } else {
+                "&vnetDefaultRoute=0"
+            });
+        }
+    }
+
+    uri.push('#');
+    uri.push_str(&name);
+    uri
 }
 
 fn url_encode(s: &str) -> String {
@@ -188,6 +299,8 @@ mod tests {
                 server_name: "www.microsoft.com".to_string(),
                 fingerprint: "chrome".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         }
     }
 
@@ -353,6 +466,8 @@ mod tests {
                 server_name: "www.example.org".to_string(),
                 fingerprint: "firefox".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         };
 
         let uri = to_vless_uri(&server);
@@ -412,5 +527,70 @@ mod tests {
             uri.contains("security=reality"),
             "must declare reality security"
         );
+    }
+
+    #[test]
+    fn parse_vnet_share_link() {
+        // Mirrors what 3x-ui's subService.go emits when virtualNetwork is enabled.
+        let uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@1.2.3.4:443?flow=xtls-rprx-vision&type=tcp&security=reality&sni=example.com&pbk=key&sid=id&vnet=1&vnetSubnet=10.0.0.0%2F24&vnetIp=10.0.0.5&vnetDefaultRoute=1#L3-Server";
+        let config = parse_vless_uri(uri).unwrap();
+        let vn = config
+            .virtualnet
+            .as_ref()
+            .expect("virtualnet should be populated");
+        assert!(vn.enabled);
+        assert_eq!(vn.subnet, "10.0.0.0/24");
+        assert_eq!(vn.vnet_ip, "10.0.0.5");
+        assert!(vn.default_route);
+    }
+
+    #[test]
+    fn parse_vnet_missing_ip_falls_back_to_proxy_mode() {
+        // Without vnetIp the virtualnet block must NOT be populated — same
+        // gate as Android's parser, otherwise we'd try to bring up a TUN
+        // with no assigned address.
+        let uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@1.2.3.4:443?vnet=1&vnetSubnet=10.0.0.0/24&pbk=key&sid=id";
+        let config = parse_vless_uri(uri).unwrap();
+        assert!(config.virtualnet.is_none());
+    }
+
+    #[test]
+    fn parse_vnet_rejects_ipv6_literal() {
+        // The xray-core fork's l3client is IPv4-only, so a crafted IPv6
+        // vnetIp must not slip through parse-time.
+        let uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@1.2.3.4:443?vnet=1&vnetIp=::1&pbk=key&sid=id";
+        let config = parse_vless_uri(uri).unwrap();
+        assert!(config.virtualnet.is_none());
+    }
+
+    #[test]
+    fn parse_vnet_default_route_off() {
+        let uri = "vless://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee@1.2.3.4:443?vnet=1&vnetIp=10.0.0.5&vnetDefaultRoute=0&pbk=key&sid=id";
+        let config = parse_vless_uri(uri).unwrap();
+        let vn = config.virtualnet.unwrap();
+        assert!(!vn.default_route);
+    }
+
+    #[test]
+    fn vnet_uri_roundtrip() {
+        let server = ServerConfig {
+            virtualnet: Some(VirtualNetSettings {
+                enabled: true,
+                subnet: "10.0.0.0/24".to_string(),
+                vnet_ip: "10.0.0.42".to_string(),
+                default_route: true,
+                interface_name: None,
+                mtu: None,
+            }),
+            ..sample_server()
+        };
+        let uri = to_vless_uri(&server);
+        assert!(uri.contains("vnet=1"));
+        assert!(uri.contains("vnetIp=10.0.0.42"));
+        let parsed = parse_vless_uri(&uri).unwrap();
+        let vn = parsed.virtualnet.unwrap();
+        assert_eq!(vn.subnet, "10.0.0.0/24");
+        assert_eq!(vn.vnet_ip, "10.0.0.42");
+        assert!(vn.default_route);
     }
 }

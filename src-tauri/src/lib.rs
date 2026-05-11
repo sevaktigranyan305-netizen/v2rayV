@@ -14,6 +14,40 @@ pub mod xray;
 use tauri::Manager;
 use xray::XrayManager;
 
+/// Copy `wintun.dll` from the bundle resources into the directory of the
+/// currently-running v2rayV.exe (== directory of xray.exe sidecar). The
+/// xray-core wintun backend calls `LoadLibrary("wintun.dll")` which only
+/// finds the DLL if it sits next to the calling executable.
+///
+/// Idempotent: if the destination already exists we leave it alone.
+#[cfg(target_os = "windows")]
+fn ensure_wintun_next_to_exe<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let exe = std::env::current_exe()?;
+    let exe_dir = exe.parent().ok_or("current_exe has no parent directory")?;
+    let dst = exe_dir.join("wintun.dll");
+    if dst.exists() {
+        log::info!("wintun.dll already present at {}", dst.display());
+        return Ok(());
+    }
+
+    let resource_path = app
+        .path()
+        .resolve("binaries/wintun.dll", tauri::path::BaseDirectory::Resource)?;
+    if !resource_path.exists() {
+        return Err(format!("wintun.dll resource missing at {}", resource_path.display()).into());
+    }
+
+    std::fs::copy(&resource_path, &dst)?;
+    log::info!(
+        "Staged wintun.dll: {} -> {}",
+        resource_path.display(),
+        dst.display()
+    );
+    Ok(())
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -27,6 +61,19 @@ pub fn run() {
                         .level(log::LevelFilter::Info)
                         .build(),
                 )?;
+            }
+
+            // Windows: wintun.dll has to live next to xray.exe (the loader
+            // searches the calling exe's directory first). Tauri ships it
+            // as a bundle resource under <install_dir>/resources/binaries/,
+            // so copy it once into <install_dir>/ if it isn't there yet.
+            // Writing to Program Files works because our manifest forces
+            // UAC elevation.
+            #[cfg(target_os = "windows")]
+            {
+                if let Err(e) = ensure_wintun_next_to_exe(app.handle()) {
+                    log::warn!("Failed to stage wintun.dll: {e}");
+                }
             }
 
             // Clean up stale TUN from previous crash (Linux only)
@@ -95,7 +142,10 @@ pub fn run() {
             commands::delete_server,
             commands::export_servers,
             commands::import_servers,
-            commands::add_servers_from_subscription,
+            commands::list_subscriptions,
+            commands::add_subscription,
+            commands::refresh_subscription,
+            commands::delete_subscription,
             commands::get_speed_stats,
             commands::get_logs,
             commands::clear_logs,

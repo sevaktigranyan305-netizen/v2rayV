@@ -7,7 +7,7 @@
 	interface Props {
 		onImportJson: (json: string) => Promise<void>;
 		onImportUri: (uri: string) => Promise<void>;
-		onImportSubscription: (url: string) => Promise<void>;
+		onAddSubscription: (name: string, url: string) => Promise<void>;
 		onExportJson: () => Promise<string | null>;
 		onExportUri: () => Promise<string | null>;
 		onToast: (message: string, type?: 'success' | 'error') => void;
@@ -16,7 +16,7 @@
 	const {
 		onImportJson,
 		onImportUri,
-		onImportSubscription,
+		onAddSubscription,
 		onExportJson,
 		onExportUri,
 		onToast
@@ -62,9 +62,9 @@
 		}
 	}
 
-	async function handleSubscriptionImport(url: string) {
+	async function handleSubscriptionImport(name: string, url: string) {
 		try {
-			await onImportSubscription(url);
+			await onAddSubscription(name, url);
 		} finally {
 			showSubscriptionModal = false;
 		}

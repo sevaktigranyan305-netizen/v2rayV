@@ -3,10 +3,11 @@ use std::path::PathBuf;
 
 use tauri::{AppHandle, Manager, Runtime};
 
-use crate::models::{AppError, AppSettings, ServerConfig};
+use crate::models::{AppError, AppSettings, ServerConfig, Subscription};
 
 const SERVERS_FILE: &str = "servers.json";
 const SETTINGS_FILE: &str = "settings.json";
+const SUBSCRIPTIONS_FILE: &str = "subscriptions.json";
 
 fn servers_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, AppError> {
     let config_dir = app
@@ -80,6 +81,46 @@ pub fn save_settings<R: Runtime>(
         fs::create_dir_all(parent)?;
     }
     let data = serde_json::to_string_pretty(settings)?;
+    fs::write(&path, &data)?;
+    set_restrictive_permissions(&path);
+    Ok(())
+}
+
+fn subscriptions_path<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, AppError> {
+    let config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|e| AppError::Config(format!("Failed to get app config dir: {e}")))?;
+    Ok(config_dir.join(SUBSCRIPTIONS_FILE))
+}
+
+pub fn load_subscriptions<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<Subscription>, AppError> {
+    let path = subscriptions_path(app)?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let data = fs::read_to_string(&path)?;
+    match serde_json::from_str::<Vec<Subscription>>(&data) {
+        Ok(subs) => Ok(subs),
+        Err(e) => {
+            // A corrupt subscriptions file shouldn't brick the whole app —
+            // settings.json applies the same recovery, so do the same here.
+            log::warn!("Corrupted subscriptions.json, resetting: {e}");
+            let _ = fs::remove_file(&path);
+            Ok(Vec::new())
+        }
+    }
+}
+
+pub fn save_subscriptions<R: Runtime>(
+    app: &AppHandle<R>,
+    subs: &[Subscription],
+) -> Result<(), AppError> {
+    let path = subscriptions_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let data = serde_json::to_string_pretty(subs)?;
     fs::write(&path, &data)?;
     set_restrictive_permissions(&path);
     Ok(())

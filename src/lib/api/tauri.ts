@@ -1,5 +1,14 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, ConnectionInfo, DetectedVpn, LogEntry, ServerConfig, SpeedStats } from '$lib/types';
+import type {
+	AppSettings,
+	ConnectionInfo,
+	DetectedVpn,
+	LogEntry,
+	ServerConfig,
+	SpeedStats,
+	Subscription,
+	SubscriptionRefresh
+} from '$lib/types';
 
 export async function connect(config: ServerConfig): Promise<void> {
 	await invoke<void>('connect', { serverConfig: config });
@@ -39,8 +48,31 @@ export async function importServers(json: string): Promise<ServerConfig[]> {
 	return await invoke<ServerConfig[]>('import_servers', { json });
 }
 
-export async function addServersFromSubscription(url: string): Promise<ServerConfig[]> {
-	return await invoke<ServerConfig[]>('add_servers_from_subscription', { url });
+// Saved subscriptions: persisted name+URL with last-refresh timestamp.
+// `add_subscription` does both save+import in one call; `refresh_subscription`
+// re-fetches the URL and **replaces** every server tagged with that
+// subscription's id. `delete_subscription` removes the subscription and
+// optionally cascades to its imported servers.
+export async function listSubscriptions(): Promise<Subscription[]> {
+	return await invoke<Subscription[]>('list_subscriptions');
+}
+
+export async function addSubscription(
+	name: string,
+	url: string
+): Promise<SubscriptionRefresh> {
+	return await invoke<SubscriptionRefresh>('add_subscription', { name, url });
+}
+
+export async function refreshSubscription(id: string): Promise<SubscriptionRefresh> {
+	return await invoke<SubscriptionRefresh>('refresh_subscription', { id });
+}
+
+export async function deleteSubscription(
+	id: string,
+	deleteServers: boolean
+): Promise<void> {
+	await invoke<void>('delete_subscription', { id, deleteServers });
 }
 
 // VLESS URI

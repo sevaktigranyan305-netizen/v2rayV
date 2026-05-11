@@ -31,6 +31,10 @@ pub struct XrayManager {
     bypass_domains: Arc<Mutex<Vec<String>>>,
     bypass_subnets: Arc<Mutex<Vec<String>>>,
     detected_vpns: Arc<Mutex<Vec<DetectedVpn>>>,
+    /// Whether the *current* connection is L3 (virtualnet). Set in `start`
+    /// and cleared in `stop_desktop` so that the stop path can skip
+    /// system-proxy disable / TUN cleanup that was never set up.
+    l3_mode: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for XrayManager {
@@ -52,6 +56,7 @@ impl XrayManager {
             bypass_domains: Arc::new(Mutex::new(Vec::new())),
             bypass_subnets: Arc::new(Mutex::new(Vec::new())),
             detected_vpns: Arc::new(Mutex::new(Vec::new())),
+            l3_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -115,6 +120,14 @@ impl XrayManager {
                 info!("Killed stale xray process");
             }
         }
+
+        // L3 (virtualnet) mode lets xray-core's `l3client` own the TUN
+        // adapter directly, so we skip system-proxy and the
+        // hev-socks5-tunnel sidecar entirely. Threaded into the stdout
+        // monitor and the Linux TUN launcher below so they branch on it.
+        let l3_mode = config::virtualnet_enabled(server).is_some();
+        self.l3_mode
+            .store(l3_mode, std::sync::atomic::Ordering::Release);
 
         // Detect corporate VPN interfaces and bypass subnets
         let vpns = network::detect_vpn_routes();
@@ -269,8 +282,17 @@ impl XrayManager {
         let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started_flag_clone = started_flag.clone();
         let started_flag_verify = started_flag.clone();
+        let started_flag_fallback = started_flag.clone();
         #[cfg(target_os = "linux")]
         let started_flag_tun = started_flag.clone();
+
+        // True once we've seen at least one line of xray output. Used by
+        // the fallback timer below to distinguish "xray is alive and
+        // emitting logs but we missed the magic word" from "xray crashed
+        // before printing anything".
+        let output_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_seen_stdout = output_seen.clone();
+        let output_seen_stderr = output_seen.clone();
 
         // Connection timeout: kill xray if not started within 15 seconds
         let timeout_state = self.state.clone();
@@ -304,6 +326,53 @@ impl XrayManager {
             }
         });
 
+        // Fallback connection trigger: if after 6 seconds we've seen at
+        // least one line of xray output but haven't observed the magic
+        // "started" word (e.g. because pipe buffering on Windows
+        // re-ordered the line, or xray-core changed the message), promote
+        // Connecting → Connected anyway. The 15-second timeout above
+        // still fires if xray produces NO output, so a truly broken
+        // process still gets cleaned up.
+        let fallback_state = self.state.clone();
+        let fallback_logs = self.logs.clone();
+        let fallback_app = app.clone();
+        let fallback_server_name = server.name.clone();
+        let fallback_server_address = server.address.clone();
+        let fallback_l3_mode = l3_mode;
+        let fallback_bypass_ref = self.bypass_domains.clone();
+        let fallback_bypass_subnets_ref = self.bypass_subnets.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            if started_flag_fallback.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            if !output_seen.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            if mark_connected(
+                &started_flag_fallback,
+                &fallback_state,
+                &fallback_server_name,
+                &fallback_server_address,
+            ) {
+                warn!(
+                    "xray fallback connection trigger: 'started' log not observed but \
+                     xray is producing output, marking Connected"
+                );
+                push_log_entry(
+                    &fallback_logs,
+                    "info",
+                    "Marking Connected via fallback (no 'started' log observed)",
+                );
+                if !fallback_l3_mode {
+                    let domains = fallback_bypass_ref.lock().unwrap().clone();
+                    let subnets = fallback_bypass_subnets_ref.lock().unwrap().clone();
+                    proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                }
+                let _ = fallback_app.emit("connection-status-changed", "connected");
+            }
+        });
+
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
@@ -312,15 +381,18 @@ impl XrayManager {
                         let trimmed = line_str.trim();
                         info!("xray stdout: {}", trimmed);
                         push_log_entry(&logs_ref, "info", trimmed);
+                        output_seen_stdout.store(true, std::sync::atomic::Ordering::Release);
 
                         if !started_flag.load(std::sync::atomic::Ordering::Acquire)
-                            && trimmed.contains("started")
+                            && line_signals_started(trimmed)
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully (detected from stdout)");
-                            let domains = bypass_ref.lock().unwrap().clone();
-                            let subnets = bypass_subnets_ref.lock().unwrap().clone();
-                            proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            if !l3_mode {
+                                let domains = bypass_ref.lock().unwrap().clone();
+                                let subnets = bypass_subnets_ref.lock().unwrap().clone();
+                                proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            }
                             let _ = app_handle.emit("connection-status-changed", "connected");
                         }
                     }
@@ -328,6 +400,7 @@ impl XrayManager {
                         let line_str = String::from_utf8_lossy(&line);
                         let trimmed = line_str.trim();
                         info!("xray stderr: {}", trimmed);
+                        output_seen_stderr.store(true, std::sync::atomic::Ordering::Release);
 
                         let level = if trimmed.contains("[Warning]") {
                             "warning"
@@ -339,13 +412,15 @@ impl XrayManager {
                         push_log_entry(&logs_ref, level, trimmed);
 
                         if !started_flag.load(std::sync::atomic::Ordering::Acquire)
-                            && trimmed.contains("started")
+                            && line_signals_started(trimmed)
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully");
-                            let domains = bypass_ref.lock().unwrap().clone();
-                            let subnets = bypass_subnets_ref.lock().unwrap().clone();
-                            proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            if !l3_mode {
+                                let domains = bypass_ref.lock().unwrap().clone();
+                                let subnets = bypass_subnets_ref.lock().unwrap().clone();
+                                proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            }
                             let _ = app_handle.emit("connection-status-changed", "connected");
                         }
                     }
@@ -364,7 +439,9 @@ impl XrayManager {
                         );
                         push_log_entry(&logs_ref, "warning", &msg);
 
-                        proxy::disable_system_proxy();
+                        if !l3_mode {
+                            proxy::disable_system_proxy();
+                        }
 
                         let mut s = state.lock().unwrap();
                         if s.status == ConnectionStatus::Disconnecting {
@@ -392,7 +469,13 @@ impl XrayManager {
             }
         });
 
-        // Post-connection verification: check SOCKS proxy and traffic flow
+        // Post-connection verification: check SOCKS proxy and traffic flow.
+        // In L3 (virtualnet) mode there is no SOCKS5 inbound at all —
+        // xray-core's l3client owns the TUN and traffic never goes through
+        // 127.0.0.1:10808. Probing for a non-existent listener would just
+        // emit a misleading "SOCKS5 proxy NOT reachable" warning every
+        // single connect, so skip the verify thread entirely.
+        let verify_l3_mode = l3_mode;
         std::thread::spawn(move || {
             // Wait for connection to be established (up to 20s)
             for _ in 0..40 {
@@ -403,6 +486,10 @@ impl XrayManager {
             }
             if !started_flag_verify.load(std::sync::atomic::Ordering::Acquire) {
                 return; // Timeout thread already handled this
+            }
+            if verify_l3_mode {
+                info!("[verify] L3 mode active — skipping SOCKS5/system-proxy probes");
+                return;
             }
 
             // Step 1: Verify SOCKS5 proxy is reachable
@@ -503,9 +590,12 @@ impl XrayManager {
             }
         });
 
-        // Start TUN mode after xray connects (Linux only)
+        // Start TUN mode after xray connects (Linux only). In L3 mode
+        // xray-core's `l3client` already owns a native TUN, so launching
+        // hev-socks5-tunnel on top of it would race for the same
+        // adapter — skip it.
         #[cfg(target_os = "linux")]
-        {
+        if !l3_mode {
             let (hev_bin, tun_config_dir, tun_server_ip, tun_bypass_subnets, tun_gateway_info) =
                 tun_data;
             let tun_logs = self.logs.clone();
@@ -619,10 +709,15 @@ impl XrayManager {
     }
 
     fn stop_desktop(&self) -> Result<(), AppError> {
+        let t0 = std::time::Instant::now();
+        let l3_mode = self.l3_mode.load(std::sync::atomic::Ordering::Acquire);
+
         // Stop TUN mode first (Linux only) — must happen before killing xray
-        // so hev-socks5-tunnel can cleanly shut down while SOCKS5 is still available
+        // so hev-socks5-tunnel can cleanly shut down while SOCKS5 is still
+        // available. In L3 mode no hev-socks5-tunnel was launched in the
+        // first place, so skip the cleanup.
         #[cfg(target_os = "linux")]
-        {
+        if !l3_mode {
             let config_dir = self
                 .config_path
                 .lock()
@@ -640,22 +735,40 @@ impl XrayManager {
                 }
             }
         }
+        let t1 = std::time::Instant::now();
 
-        // Disable system proxy
-        proxy::disable_system_proxy();
+        // Disable system proxy. In L3 mode we never enabled it (xray-core's
+        // l3client owns the TUN adapter and the OS resolver/proxy is
+        // untouched), so the registry write would just churn for nothing
+        // — skip it. On the slow Parallels x86_64 emulation this can
+        // shave several seconds off the user-visible disconnect time.
+        if !l3_mode {
+            proxy::disable_system_proxy();
+        }
+        let t2 = std::time::Instant::now();
 
-        // Kill the child process
+        // Hard-kill the child process. tauri-plugin-shell's CommandChild::kill
+        // delegates to shared_child, which on Windows uses TerminateProcess
+        // and on Unix uses SIGKILL — neither of which gives xray-core a
+        // chance to run its [Debug] "Logger closing" cleanup loop. That's
+        // intentional: graceful shutdown can keep the process alive for
+        // several seconds while the Go logger drains, and on the next
+        // launch xray-core itself reaps the orphaned wintun adapter
+        // ("Removed orphaned adapter ..."). A hard kill is faster and
+        // produces no observable downside.
         let child = {
             let mut guard = self.child.lock().unwrap();
             guard.take()
         };
 
         if let Some(child) = child {
+            let pid = child.pid();
             child
                 .kill()
                 .map_err(|e| AppError::XrayProcess(format!("Failed to kill xray: {e}")))?;
-            info!("Killed xray process");
+            info!("Hard-killed xray process (pid={pid})");
         }
+        let t3 = std::time::Instant::now();
 
         // Clean up config file
         let config_path = {
@@ -668,7 +781,19 @@ impl XrayManager {
                 info!("Removed config file: {}", path.display());
             }
         }
+        let t4 = std::time::Instant::now();
 
+        self.l3_mode
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        info!(
+            "[stop] timings tun={:?} disable_proxy={:?} kill={:?} fs_cleanup={:?} total={:?}",
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            t4 - t0
+        );
         Ok(())
     }
 
@@ -823,6 +948,21 @@ impl XrayManager {
             state.error_message = Some(err);
         }
     }
+}
+
+/// Look for any of the signals that xray-core has finished startup and
+/// is accepting connections. The canonical message is
+/// `[Warning] core: Xray <version> started`, but pipe buffering on
+/// Windows can re-order or merge lines so we also accept the
+/// virtualNetwork / l3client init markers as proof that startup got far
+/// enough to be serving traffic.
+fn line_signals_started(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    line.contains("started")
+        || line.contains("core: Xray ")
+        || line.contains("virtualNetwork: l3client created")
 }
 
 /// Transition state Connecting → Connected atomically under the state lock.

@@ -5,6 +5,15 @@ export interface RealitySettings {
 	fingerprint: string;
 }
 
+export interface VirtualNetSettings {
+	enabled: boolean;
+	subnet: string;
+	vnet_ip: string;
+	default_route: boolean;
+	interface_name?: string | null;
+	mtu?: number | null;
+}
+
 export interface ServerConfig {
 	id: string;
 	name: string;
@@ -13,6 +22,21 @@ export interface ServerConfig {
 	uuid: string;
 	flow: string;
 	reality: RealitySettings;
+	virtualnet?: VirtualNetSettings | null;
+	subscription_id?: string | null;
+}
+
+export interface Subscription {
+	id: string;
+	name: string;
+	url: string;
+	last_updated_at?: number | null;
+	last_server_count?: number | null;
+}
+
+export interface SubscriptionRefresh {
+	subscription: Subscription;
+	servers: ServerConfig[];
 }
 
 export type ConnectionStatus =
