@@ -112,7 +112,10 @@ impl XrayManager {
         // Update status to connecting
         self.update_status(ConnectionStatus::Connecting, Some(server), None);
 
-        self.start_desktop(app, server, bypass_domains)?;
+        if let Err(e) = self.start_desktop(app, server, bypass_domains) {
+            self.update_status(ConnectionStatus::Error, None, Some(e.to_string()));
+            return Err(e);
+        }
 
         Ok(())
     }

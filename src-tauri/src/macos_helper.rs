@@ -41,7 +41,9 @@ pub fn read_password() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let pw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let pw = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     if pw.is_empty() {
         None
     } else {
@@ -140,12 +142,16 @@ pub fn validate_password(password: &str) -> Result<bool, AppError> {
         .spawn()
         .map_err(|e| AppError::XrayProcess(format!("Failed to spawn sudo: {e}")))?;
 
-    if let Some(stdin) = child.stdin.as_mut() {
+    if let Some(mut stdin) = child.stdin.take() {
         // Trailing newline so sudo's read() returns instead of
         // blocking forever on an unterminated line.
         if let Err(e) = writeln!(stdin, "{password}") {
             warn!("Failed to write password to sudo stdin: {e}");
         }
+        // Close stdin so sudo gets EOF immediately after reading the
+        // password. Without this, a wrong password causes sudo to
+        // block waiting for a second attempt until the 5 s timeout.
+        drop(stdin);
     }
 
     // Give sudo a moment to read the password and decide. If it lingers
