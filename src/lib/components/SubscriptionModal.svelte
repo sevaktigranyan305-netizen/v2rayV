@@ -1,29 +1,35 @@
 <script lang="ts">
 	interface Props {
-		onImport: (url: string) => Promise<void>;
+		onImport: (name: string, url: string) => Promise<void>;
 		onCancel: () => void;
 	}
 
 	const { onImport, onCancel }: Props = $props();
 
+	let name = $state('');
 	let url = $state('');
 	let error = $state('');
 	let busy = $state(false);
 
 	async function handleSubmit(e: Event) {
 		e.preventDefault();
-		const trimmed = url.trim();
-		if (!trimmed) {
+		const trimmedName = name.trim();
+		const trimmedUrl = url.trim();
+		if (!trimmedName) {
+			error = 'Please enter a name for this subscription';
+			return;
+		}
+		if (!trimmedUrl) {
 			error = 'Please enter a subscription URL';
 			return;
 		}
-		if (!(trimmed.startsWith('http://') || trimmed.startsWith('https://'))) {
+		if (!(trimmedUrl.startsWith('http://') || trimmedUrl.startsWith('https://'))) {
 			error = 'URL must start with http:// or https://';
 			return;
 		}
 		busy = true;
 		try {
-			await onImport(trimmed);
+			await onImport(trimmedName, trimmedUrl);
 		} finally {
 			busy = false;
 		}
@@ -70,6 +76,24 @@
 		</div>
 
 		<form onsubmit={handleSubmit} class="px-5 py-4 flex flex-col gap-4">
+			<div class="flex flex-col gap-1">
+				<label for="sub-name-input" class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+					Name
+				</label>
+				<input
+					id="sub-name-input"
+					type="text"
+					bind:value={name}
+					placeholder="My provider"
+					disabled={busy}
+					class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+					oninput={() => { error = ''; }}
+				/>
+				<p class="text-[11px] text-muted-foreground">
+					A label you'll see in the Subscriptions list.
+				</p>
+			</div>
+
 			<div class="flex flex-col gap-1">
 				<label for="sub-url-input" class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
 					Subscription URL

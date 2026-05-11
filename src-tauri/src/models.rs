@@ -15,6 +15,66 @@ pub struct ServerConfig {
     pub uuid: String,
     pub flow: String,
     pub reality: RealitySettings,
+    /// L3 virtual-network hints from our 3x-ui fork. When present and
+    /// `enabled == true`, the xray-core fork's `l3client` outbound takes
+    /// over and we run **without** SOCKS/HTTP inbounds or system proxy —
+    /// xray itself owns the TUN adapter (wintun on Windows, utun on
+    /// macOS, native Linux TUN). Mirrors `vnet=` / `vnetSubnet=` /
+    /// `vnetIp=` / `vnetDefaultRoute=` query params from the share-link.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtualnet: Option<VirtualNetSettings>,
+    /// Tag set on every server pulled from a saved subscription. Used by
+    /// `refresh_subscription` to know which servers to wipe before
+    /// re-importing the freshly-fetched list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscription_id: Option<String>,
+}
+
+/// L3 virtual-network configuration matching the 3x-ui inbound's
+/// `virtualNetwork` block. Only `subnet` and `vnet_ip` are required; the
+/// rest have sensible defaults so a minimal `vnet=1&vnetIp=10.0.0.5`
+/// share-link is enough to bring the tunnel up.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VirtualNetSettings {
+    pub enabled: bool,
+    /// CIDR like "10.0.0.0/24". Must be IPv4 — the xray-core fork's
+    /// `l3client` only supports IPv4 subnets and the panel's IPAM only
+    /// hands out IPv4 addresses.
+    pub subnet: String,
+    /// Pre-allocated per-uuid IPv4 from the panel's IPAM (e.g. "10.0.0.5").
+    pub vnet_ip: String,
+    /// When true, route 0.0.0.0/0 through the TUN. Mirrors
+    /// `vnetDefaultRoute=1` from the share-link; on the panel side this
+    /// is forced to true so the safe default here is also true.
+    #[serde(default = "default_default_route")]
+    pub default_route: bool,
+    /// TUN interface name, defaults to "v2rayV" inside xray-core.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_name: Option<String>,
+    /// Optional MTU override; xray-core picks a sane default if 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mtu: Option<u32>,
+}
+
+fn default_default_route() -> bool {
+    true
+}
+
+/// A saved subscription: name + URL, with last-refresh timestamp. The
+/// servers it produced are linked via `ServerConfig.subscription_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Subscription {
+    #[serde(default = "generate_id")]
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    /// Unix-seconds timestamp of the last successful refresh, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_updated_at: Option<u64>,
+    /// Number of servers the last refresh produced. Surfaced in the UI
+    /// so the user can sanity-check that the URL still returns configs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_server_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,6 +183,8 @@ impl Default for ServerConfig {
             uuid: String::new(),
             flow: "xtls-rprx-vision".to_string(),
             reality: RealitySettings::default(),
+            virtualnet: None,
+            subscription_id: None,
         }
     }
 }
@@ -225,6 +287,8 @@ mod tests {
                 server_name: "example.com".to_string(),
                 fingerprint: "chrome".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         }
     }
 

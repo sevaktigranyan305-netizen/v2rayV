@@ -3,17 +3,20 @@
 	import { connectionStore } from '$lib/stores/connection.svelte';
 	import { serversStore } from '$lib/stores/servers.svelte';
 	import { settingsStore } from '$lib/stores/settings.svelte';
+	import { subscriptionsStore } from '$lib/stores/subscriptions.svelte';
 	import ConnectButton from '$lib/components/ConnectButton.svelte';
 	import StatusDisplay from '$lib/components/StatusDisplay.svelte';
 	import ServerList from '$lib/components/ServerList.svelte';
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import ImportExportBar from '$lib/components/ImportExportBar.svelte';
+	import SubscriptionList from '$lib/components/SubscriptionList.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import type { ServerConfig } from '$lib/types';
 
 	const store = connectionStore;
 	const servers = serversStore;
 	const appSettings = settingsStore;
+	const subscriptions = subscriptionsStore;
 
 	// Form modal state
 	let showForm = $state(false);
@@ -99,12 +102,36 @@
 		}
 	}
 
-	async function handleImportSubscription(url: string) {
+	async function handleAddSubscription(name: string, url: string) {
 		try {
-			const imported = await servers.importFromSubscription(url);
-			showToast(`Imported ${imported.length} server(s) from subscription`);
+			const count = await subscriptions.add(name, url);
+			await servers.load();
+			showToast(`Imported ${count} server(s) from "${name}"`);
 		} catch (e) {
 			showToast(`Subscription import failed: ${e}`, 'error');
+			throw e;
+		}
+	}
+
+	async function handleRefreshSubscription(id: string) {
+		try {
+			const count = await subscriptions.refresh(id);
+			await servers.load();
+			showToast(`Refreshed subscription — ${count} server(s)`);
+		} catch (e) {
+			showToast(`Refresh failed: ${e}`, 'error');
+		}
+	}
+
+	async function handleDeleteSubscription(id: string, deleteServers: boolean) {
+		try {
+			await subscriptions.remove(id, deleteServers);
+			await servers.load();
+			showToast(
+				deleteServers ? 'Subscription and its servers deleted' : 'Subscription deleted'
+			);
+		} catch (e) {
+			showToast(`Delete failed: ${e}`, 'error');
 		}
 	}
 
@@ -137,6 +164,11 @@
 			await servers.load();
 		} catch (e) {
 			showToast(`Failed to load servers: ${e}`, 'error');
+		}
+		try {
+			await subscriptions.load();
+		} catch (e) {
+			showToast(`Failed to load subscriptions: ${e}`, 'error');
 		}
 		await appSettings.load();
 		if (appSettings.loadError) {
@@ -171,10 +203,17 @@
 	<ImportExportBar
 		onImportJson={handleImportJson}
 		onImportUri={handleImportUri}
-		onImportSubscription={handleImportSubscription}
+		onAddSubscription={handleAddSubscription}
 		onExportJson={handleExportJson}
 		onExportUri={handleExportUri}
 		onToast={showToast}
+	/>
+
+	<!-- Saved subscriptions -->
+	<SubscriptionList
+		subscriptions={subscriptions.subscriptions}
+		onRefresh={handleRefreshSubscription}
+		onDelete={handleDeleteSubscription}
 	/>
 
 	<!-- Settings bar -->

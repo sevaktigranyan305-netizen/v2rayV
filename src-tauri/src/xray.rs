@@ -116,6 +116,12 @@ impl XrayManager {
             }
         }
 
+        // L3 (virtualnet) mode lets xray-core's `l3client` own the TUN
+        // adapter directly, so we skip system-proxy and the
+        // hev-socks5-tunnel sidecar entirely. Threaded into the stdout
+        // monitor and the Linux TUN launcher below so they branch on it.
+        let l3_mode = config::virtualnet_enabled(server).is_some();
+
         // Detect corporate VPN interfaces and bypass subnets
         let vpns = network::detect_vpn_routes();
         let bypass_subnet_list = network::collect_bypass_subnets(&vpns);
@@ -318,9 +324,11 @@ impl XrayManager {
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully (detected from stdout)");
-                            let domains = bypass_ref.lock().unwrap().clone();
-                            let subnets = bypass_subnets_ref.lock().unwrap().clone();
-                            proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            if !l3_mode {
+                                let domains = bypass_ref.lock().unwrap().clone();
+                                let subnets = bypass_subnets_ref.lock().unwrap().clone();
+                                proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            }
                             let _ = app_handle.emit("connection-status-changed", "connected");
                         }
                     }
@@ -343,9 +351,11 @@ impl XrayManager {
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully");
-                            let domains = bypass_ref.lock().unwrap().clone();
-                            let subnets = bypass_subnets_ref.lock().unwrap().clone();
-                            proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            if !l3_mode {
+                                let domains = bypass_ref.lock().unwrap().clone();
+                                let subnets = bypass_subnets_ref.lock().unwrap().clone();
+                                proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                            }
                             let _ = app_handle.emit("connection-status-changed", "connected");
                         }
                     }
@@ -364,7 +374,9 @@ impl XrayManager {
                         );
                         push_log_entry(&logs_ref, "warning", &msg);
 
-                        proxy::disable_system_proxy();
+                        if !l3_mode {
+                            proxy::disable_system_proxy();
+                        }
 
                         let mut s = state.lock().unwrap();
                         if s.status == ConnectionStatus::Disconnecting {
@@ -503,9 +515,12 @@ impl XrayManager {
             }
         });
 
-        // Start TUN mode after xray connects (Linux only)
+        // Start TUN mode after xray connects (Linux only). In L3 mode
+        // xray-core's `l3client` already owns a native TUN, so launching
+        // hev-socks5-tunnel on top of it would race for the same
+        // adapter — skip it.
         #[cfg(target_os = "linux")]
-        {
+        if !l3_mode {
             let (hev_bin, tun_config_dir, tun_server_ip, tun_bypass_subnets, tun_gateway_info) =
                 tun_data;
             let tun_logs = self.logs.clone();

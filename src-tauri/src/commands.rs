@@ -1,12 +1,22 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use tauri::{AppHandle, Runtime, State};
 
 use crate::models::{
     AppSettings, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
+    Subscription,
 };
 use crate::network;
 use crate::storage;
 use crate::subscription;
 use crate::xray::XrayManager;
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 #[tauri::command]
 pub fn connect<R: Runtime>(
@@ -132,14 +142,37 @@ pub fn import_servers<R: Runtime>(
     Ok(new_servers)
 }
 
-/// One-shot subscription import: fetch the URL, decode (base64 or plaintext),
-/// parse every `vless://` line, persist the new servers (with fresh ids), and
-/// return the imported set. Existing servers are preserved.
+/// Result of a subscription add/refresh: the (possibly updated) saved
+/// subscription plus the freshly-imported set of servers tagged with
+/// that subscription's id.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SubscriptionRefresh {
+    pub subscription: Subscription,
+    pub servers: Vec<ServerConfig>,
+}
+
+/// List every saved subscription. The UI uses this to render the
+/// "Subscriptions" panel with Refresh / Delete buttons per row.
 #[tauri::command]
-pub async fn add_servers_from_subscription<R: Runtime>(
+pub fn list_subscriptions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Subscription>, String> {
+    storage::load_subscriptions(&app).map_err(|e| e.to_string())
+}
+
+/// Save a subscription (name + URL) and import its servers in one go.
+/// The URL is fetched, decoded (base64 or plaintext), and every parseable
+/// `vless://` line is persisted with `subscription_id` set so a later
+/// `refresh_subscription` can replace exactly this set.
+#[tauri::command]
+pub async fn add_subscription<R: Runtime>(
     app: AppHandle<R>,
+    name: String,
     url: String,
-) -> Result<Vec<ServerConfig>, String> {
+) -> Result<SubscriptionRefresh, String> {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return Err("Subscription name must not be empty".to_string());
+    }
+
     let parsed = subscription::fetch_subscription(&url)
         .await
         .map_err(|e| e.to_string())?;
@@ -147,17 +180,122 @@ pub async fn add_servers_from_subscription<R: Runtime>(
         return Err("No vless:// servers found in subscription".to_string());
     }
 
-    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
+    let sub_id = uuid::Uuid::new_v4().to_string();
     let new_servers: Vec<ServerConfig> = parsed
         .into_iter()
         .map(|mut s| {
             s.id = uuid::Uuid::new_v4().to_string();
+            s.subscription_id = Some(sub_id.clone());
             s
         })
         .collect();
+
+    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
     servers.extend(new_servers.clone());
     storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
-    Ok(new_servers)
+
+    let subscription = Subscription {
+        id: sub_id,
+        name,
+        url: url.trim().to_string(),
+        last_updated_at: Some(now_unix_seconds()),
+        last_server_count: Some(new_servers.len() as u32),
+    };
+    let mut subs = storage::load_subscriptions(&app).map_err(|e| e.to_string())?;
+    subs.push(subscription.clone());
+    storage::save_subscriptions(&app, &subs).map_err(|e| e.to_string())?;
+
+    Ok(SubscriptionRefresh {
+        subscription,
+        servers: new_servers,
+    })
+}
+
+/// Re-fetch a saved subscription and **replace** every server tagged with
+/// its id with the freshly-imported set. The subscription's
+/// `last_updated_at` and `last_server_count` are bumped on success.
+///
+/// If the URL still parses but returns zero servers, the call fails and
+/// nothing is touched on disk — better to keep the old set than wipe
+/// everything because of a transient panel-side error.
+#[tauri::command]
+pub async fn refresh_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+) -> Result<SubscriptionRefresh, String> {
+    let mut subs = storage::load_subscriptions(&app).map_err(|e| e.to_string())?;
+    let pos = subs
+        .iter()
+        .position(|s| s.id == id)
+        .ok_or_else(|| format!("Subscription with id {id} not found"))?;
+    let url = subs[pos].url.clone();
+
+    let parsed = subscription::fetch_subscription(&url)
+        .await
+        .map_err(|e| e.to_string())?;
+    if parsed.is_empty() {
+        return Err("No vless:// servers found in subscription".to_string());
+    }
+
+    let new_servers: Vec<ServerConfig> = parsed
+        .into_iter()
+        .map(|mut s| {
+            s.id = uuid::Uuid::new_v4().to_string();
+            s.subscription_id = Some(id.clone());
+            s
+        })
+        .collect();
+
+    // Replace every server tagged with this subscription id with the
+    // freshly-imported set. Manually-added servers (subscription_id ==
+    // None) and servers from other subscriptions are left alone.
+    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
+    servers.retain(|s| s.subscription_id.as_deref() != Some(id.as_str()));
+    servers.extend(new_servers.clone());
+    storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
+
+    subs[pos].last_updated_at = Some(now_unix_seconds());
+    subs[pos].last_server_count = Some(new_servers.len() as u32);
+    let updated = subs[pos].clone();
+    storage::save_subscriptions(&app, &subs).map_err(|e| e.to_string())?;
+
+    Ok(SubscriptionRefresh {
+        subscription: updated,
+        servers: new_servers,
+    })
+}
+
+/// Delete a saved subscription. Per-server cascade is opt-in via
+/// `delete_servers` — by default the imported servers stay in the list
+/// (just untagged from the subscription) so the user doesn't lose them
+/// by accident.
+#[tauri::command]
+pub fn delete_subscription<R: Runtime>(
+    app: AppHandle<R>,
+    id: String,
+    delete_servers: bool,
+) -> Result<(), String> {
+    let mut subs = storage::load_subscriptions(&app).map_err(|e| e.to_string())?;
+    let len_before = subs.len();
+    subs.retain(|s| s.id != id);
+    if subs.len() == len_before {
+        return Err(format!("Subscription with id {id} not found"));
+    }
+    storage::save_subscriptions(&app, &subs).map_err(|e| e.to_string())?;
+
+    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
+    if delete_servers {
+        servers.retain(|s| s.subscription_id.as_deref() != Some(id.as_str()));
+    } else {
+        for s in servers.iter_mut() {
+            if s.subscription_id.as_deref() == Some(id.as_str()) {
+                s.subscription_id = None;
+            }
+        }
+    }
+    storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -272,6 +410,8 @@ mod tests {
                 server_name: "example.com".to_string(),
                 fingerprint: "chrome".to_string(),
             },
+            virtualnet: None,
+            subscription_id: None,
         }
     }
 
