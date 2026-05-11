@@ -10,6 +10,7 @@
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import ImportExportBar from '$lib/components/ImportExportBar.svelte';
 	import SubscriptionList from '$lib/components/SubscriptionList.svelte';
+	import SudoPasswordModal from '$lib/components/SudoPasswordModal.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import type { ServerConfig } from '$lib/types';
 
@@ -21,6 +22,13 @@
 	// Form modal state
 	let showForm = $state(false);
 	let editingServer = $state<ServerConfig | null>(null);
+
+	// macOS-only: sudo password prompt state. `pendingServer` is the
+	// server we tried to connect to right before the backend asked for
+	// the password — we re-run `connectVpn` against it once the modal
+	// reports success.
+	let showSudoModal = $state(false);
+	let pendingServer = $state<ServerConfig | null>(null);
 
 	// Toast state
 	let toast = $state<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -53,7 +61,25 @@
 			return;
 		}
 
-		await store.connectVpn(selected);
+		const outcome = await store.connectVpn(selected);
+		if (outcome === 'needs-sudo-password') {
+			pendingServer = selected;
+			showSudoModal = true;
+		}
+	}
+
+	async function handleSudoPasswordSaved() {
+		showSudoModal = false;
+		const server = pendingServer;
+		pendingServer = null;
+		if (server) {
+			await store.connectVpn(server);
+		}
+	}
+
+	function handleSudoPasswordCancelled() {
+		showSudoModal = false;
+		pendingServer = null;
 	}
 
 	function openEdit(server: ServerConfig) {
@@ -265,6 +291,14 @@
 		server={editingServer}
 		onSave={handleSave}
 		onCancel={closeForm}
+	/>
+{/if}
+
+<!-- macOS sudo password prompt -->
+{#if showSudoModal}
+	<SudoPasswordModal
+		onSuccess={handleSudoPasswordSaved}
+		onCancel={handleSudoPasswordCancelled}
 	/>
 {/if}
 
