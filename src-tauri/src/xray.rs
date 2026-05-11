@@ -275,8 +275,17 @@ impl XrayManager {
         let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let started_flag_clone = started_flag.clone();
         let started_flag_verify = started_flag.clone();
+        let started_flag_fallback = started_flag.clone();
         #[cfg(target_os = "linux")]
         let started_flag_tun = started_flag.clone();
+
+        // True once we've seen at least one line of xray output. Used by
+        // the fallback timer below to distinguish "xray is alive and
+        // emitting logs but we missed the magic word" from "xray crashed
+        // before printing anything".
+        let output_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_seen_stdout = output_seen.clone();
+        let output_seen_stderr = output_seen.clone();
 
         // Connection timeout: kill xray if not started within 15 seconds
         let timeout_state = self.state.clone();
@@ -310,6 +319,53 @@ impl XrayManager {
             }
         });
 
+        // Fallback connection trigger: if after 6 seconds we've seen at
+        // least one line of xray output but haven't observed the magic
+        // "started" word (e.g. because pipe buffering on Windows
+        // re-ordered the line, or xray-core changed the message), promote
+        // Connecting → Connected anyway. The 15-second timeout above
+        // still fires if xray produces NO output, so a truly broken
+        // process still gets cleaned up.
+        let fallback_state = self.state.clone();
+        let fallback_logs = self.logs.clone();
+        let fallback_app = app.clone();
+        let fallback_server_name = server.name.clone();
+        let fallback_server_address = server.address.clone();
+        let fallback_l3_mode = l3_mode;
+        let fallback_bypass_ref = self.bypass_domains.clone();
+        let fallback_bypass_subnets_ref = self.bypass_subnets.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(6));
+            if started_flag_fallback.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            if !output_seen.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            if mark_connected(
+                &started_flag_fallback,
+                &fallback_state,
+                &fallback_server_name,
+                &fallback_server_address,
+            ) {
+                warn!(
+                    "xray fallback connection trigger: 'started' log not observed but \
+                     xray is producing output, marking Connected"
+                );
+                push_log_entry(
+                    &fallback_logs,
+                    "info",
+                    "Marking Connected via fallback (no 'started' log observed)",
+                );
+                if !fallback_l3_mode {
+                    let domains = fallback_bypass_ref.lock().unwrap().clone();
+                    let subnets = fallback_bypass_subnets_ref.lock().unwrap().clone();
+                    proxy::enable_system_proxy(DEFAULT_SOCKS_PORT, &domains, &subnets);
+                }
+                let _ = fallback_app.emit("connection-status-changed", "connected");
+            }
+        });
+
         tauri::async_runtime::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match event {
@@ -318,9 +374,10 @@ impl XrayManager {
                         let trimmed = line_str.trim();
                         info!("xray stdout: {}", trimmed);
                         push_log_entry(&logs_ref, "info", trimmed);
+                        output_seen_stdout.store(true, std::sync::atomic::Ordering::Release);
 
                         if !started_flag.load(std::sync::atomic::Ordering::Acquire)
-                            && trimmed.contains("started")
+                            && line_signals_started(trimmed)
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully (detected from stdout)");
@@ -336,6 +393,7 @@ impl XrayManager {
                         let line_str = String::from_utf8_lossy(&line);
                         let trimmed = line_str.trim();
                         info!("xray stderr: {}", trimmed);
+                        output_seen_stderr.store(true, std::sync::atomic::Ordering::Release);
 
                         let level = if trimmed.contains("[Warning]") {
                             "warning"
@@ -347,7 +405,7 @@ impl XrayManager {
                         push_log_entry(&logs_ref, level, trimmed);
 
                         if !started_flag.load(std::sync::atomic::Ordering::Acquire)
-                            && trimmed.contains("started")
+                            && line_signals_started(trimmed)
                             && mark_connected(&started_flag, &state, &server_name, &server_address)
                         {
                             info!("xray connected successfully");
@@ -659,17 +717,26 @@ impl XrayManager {
         // Disable system proxy
         proxy::disable_system_proxy();
 
-        // Kill the child process
+        // Hard-kill the child process. tauri-plugin-shell's CommandChild::kill
+        // delegates to shared_child, which on Windows uses TerminateProcess
+        // and on Unix uses SIGKILL — neither of which gives xray-core a
+        // chance to run its [Debug] "Logger closing" cleanup loop. That's
+        // intentional: graceful shutdown can keep the process alive for
+        // several seconds while the Go logger drains, and on the next
+        // launch xray-core itself reaps the orphaned wintun adapter
+        // ("Removed orphaned adapter ..."). A hard kill is faster and
+        // produces no observable downside.
         let child = {
             let mut guard = self.child.lock().unwrap();
             guard.take()
         };
 
         if let Some(child) = child {
+            let pid = child.pid();
             child
                 .kill()
                 .map_err(|e| AppError::XrayProcess(format!("Failed to kill xray: {e}")))?;
-            info!("Killed xray process");
+            info!("Hard-killed xray process (pid={pid})");
         }
 
         // Clean up config file
@@ -838,6 +905,21 @@ impl XrayManager {
             state.error_message = Some(err);
         }
     }
+}
+
+/// Look for any of the signals that xray-core has finished startup and
+/// is accepting connections. The canonical message is
+/// `[Warning] core: Xray <version> started`, but pipe buffering on
+/// Windows can re-order or merge lines so we also accept the
+/// virtualNetwork / l3client init markers as proof that startup got far
+/// enough to be serving traffic.
+fn line_signals_started(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+    line.contains("started")
+        || line.contains("core: Xray ")
+        || line.contains("virtualNetwork: l3client created")
 }
 
 /// Transition state Connecting → Connected atomically under the state lock.

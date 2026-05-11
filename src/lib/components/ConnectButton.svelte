@@ -39,13 +39,6 @@
 		></span>
 	{/if}
 
-	<!-- Connecting/disconnecting ping -->
-	{#if status === 'connecting' || status === 'disconnecting'}
-		<span
-			class="absolute inset-0 rounded-full border-4 border-yellow-500/40 animate-ping pointer-events-none"
-		></span>
-	{/if}
-
 	<button
 		{onclick}
 		disabled={isDisabled}

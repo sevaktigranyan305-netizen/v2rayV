@@ -75,7 +75,7 @@
 			</button>
 		</div>
 
-		<form onsubmit={handleSubmit} class="px-5 py-4 flex flex-col gap-4">
+		<form onsubmit={handleSubmit} class="px-5 py-4 flex flex-col gap-4" autocomplete="off">
 			<div class="flex flex-col gap-1">
 				<label for="sub-name-input" class="text-xs font-medium text-muted-foreground uppercase tracking-wide">
 					Name
@@ -86,6 +86,12 @@
 					bind:value={name}
 					placeholder="My provider"
 					disabled={busy}
+					autocomplete="off"
+					autocorrect="off"
+					autocapitalize="off"
+					spellcheck="false"
+					data-form-type="other"
+					name="v2rayv-subscription-name"
 					class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
 					oninput={() => { error = ''; }}
 				/>
@@ -104,6 +110,12 @@
 					bind:value={url}
 					placeholder="https://example.com/sub"
 					disabled={busy}
+					autocomplete="off"
+					autocorrect="off"
+					autocapitalize="off"
+					spellcheck="false"
+					data-form-type="other"
+					name="v2rayv-subscription-url"
 					class="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
 					oninput={() => { error = ''; }}
 				/>

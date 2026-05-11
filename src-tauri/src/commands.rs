@@ -162,20 +162,29 @@ pub fn list_subscriptions<R: Runtime>(app: AppHandle<R>) -> Result<Vec<Subscript
 /// The URL is fetched, decoded (base64 or plaintext), and every parseable
 /// `vless://` line is persisted with `subscription_id` set so a later
 /// `refresh_subscription` can replace exactly this set.
+///
+/// Sync storage I/O is dispatched via `spawn_blocking` so it cannot stall
+/// the async runtime worker that is also responsible for delivering the
+/// IPC response back to the WebView. Without this, `pnpm tauri build` on
+/// Windows occasionally left the frontend `await invoke(...)` promise
+/// pending forever even though the data on disk was written correctly.
 #[tauri::command]
 pub async fn add_subscription<R: Runtime>(
     app: AppHandle<R>,
     name: String,
     url: String,
 ) -> Result<SubscriptionRefresh, String> {
+    log::info!("add_subscription: start (name={name:?})");
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err("Subscription name must not be empty".to_string());
     }
 
+    log::info!("add_subscription: fetching {url}");
     let parsed = subscription::fetch_subscription(&url)
         .await
         .map_err(|e| e.to_string())?;
+    log::info!("add_subscription: fetched {} server(s)", parsed.len());
     if parsed.is_empty() {
         return Err("No vless:// servers found in subscription".to_string());
     }
@@ -190,10 +199,6 @@ pub async fn add_subscription<R: Runtime>(
         })
         .collect();
 
-    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
-    servers.extend(new_servers.clone());
-    storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
-
     let subscription = Subscription {
         id: sub_id,
         name,
@@ -201,10 +206,25 @@ pub async fn add_subscription<R: Runtime>(
         last_updated_at: Some(now_unix_seconds()),
         last_server_count: Some(new_servers.len() as u32),
     };
-    let mut subs = storage::load_subscriptions(&app).map_err(|e| e.to_string())?;
-    subs.push(subscription.clone());
-    storage::save_subscriptions(&app, &subs).map_err(|e| e.to_string())?;
 
+    let app_for_blocking = app.clone();
+    let new_servers_for_blocking = new_servers.clone();
+    let subscription_for_blocking = subscription.clone();
+    log::info!("add_subscription: persisting to disk");
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let mut servers = storage::load_servers(&app_for_blocking).map_err(|e| e.to_string())?;
+        servers.extend(new_servers_for_blocking);
+        storage::save_servers(&app_for_blocking, &servers).map_err(|e| e.to_string())?;
+
+        let mut subs = storage::load_subscriptions(&app_for_blocking).map_err(|e| e.to_string())?;
+        subs.push(subscription_for_blocking);
+        storage::save_subscriptions(&app_for_blocking, &subs).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("storage task panicked: {e}"))??;
+
+    log::info!("add_subscription: returning success");
     Ok(SubscriptionRefresh {
         subscription,
         servers: new_servers,
@@ -223,16 +243,24 @@ pub async fn refresh_subscription<R: Runtime>(
     app: AppHandle<R>,
     id: String,
 ) -> Result<SubscriptionRefresh, String> {
-    let mut subs = storage::load_subscriptions(&app).map_err(|e| e.to_string())?;
-    let pos = subs
-        .iter()
-        .position(|s| s.id == id)
-        .ok_or_else(|| format!("Subscription with id {id} not found"))?;
-    let url = subs[pos].url.clone();
+    log::info!("refresh_subscription: start id={id}");
+    let app_for_lookup = app.clone();
+    let id_for_lookup = id.clone();
+    let url = tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let subs = storage::load_subscriptions(&app_for_lookup).map_err(|e| e.to_string())?;
+        subs.into_iter()
+            .find(|s| s.id == id_for_lookup)
+            .map(|s| s.url)
+            .ok_or_else(|| format!("Subscription with id {id_for_lookup} not found"))
+    })
+    .await
+    .map_err(|e| format!("storage task panicked: {e}"))??;
 
+    log::info!("refresh_subscription: fetching {url}");
     let parsed = subscription::fetch_subscription(&url)
         .await
         .map_err(|e| e.to_string())?;
+    log::info!("refresh_subscription: fetched {} server(s)", parsed.len());
     if parsed.is_empty() {
         return Err("No vless:// servers found in subscription".to_string());
     }
@@ -246,19 +274,34 @@ pub async fn refresh_subscription<R: Runtime>(
         })
         .collect();
 
-    // Replace every server tagged with this subscription id with the
-    // freshly-imported set. Manually-added servers (subscription_id ==
-    // None) and servers from other subscriptions are left alone.
-    let mut servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
-    servers.retain(|s| s.subscription_id.as_deref() != Some(id.as_str()));
-    servers.extend(new_servers.clone());
-    storage::save_servers(&app, &servers).map_err(|e| e.to_string())?;
+    let app_for_blocking = app.clone();
+    let id_for_blocking = id.clone();
+    let new_servers_for_blocking = new_servers.clone();
+    let updated = tauri::async_runtime::spawn_blocking(move || -> Result<Subscription, String> {
+        // Replace every server tagged with this subscription id with the
+        // freshly-imported set. Manually-added servers (subscription_id ==
+        // None) and servers from other subscriptions are left alone.
+        let mut servers = storage::load_servers(&app_for_blocking).map_err(|e| e.to_string())?;
+        servers.retain(|s| s.subscription_id.as_deref() != Some(id_for_blocking.as_str()));
+        let new_count = new_servers_for_blocking.len() as u32;
+        servers.extend(new_servers_for_blocking);
+        storage::save_servers(&app_for_blocking, &servers).map_err(|e| e.to_string())?;
 
-    subs[pos].last_updated_at = Some(now_unix_seconds());
-    subs[pos].last_server_count = Some(new_servers.len() as u32);
-    let updated = subs[pos].clone();
-    storage::save_subscriptions(&app, &subs).map_err(|e| e.to_string())?;
+        let mut subs = storage::load_subscriptions(&app_for_blocking).map_err(|e| e.to_string())?;
+        let pos = subs
+            .iter()
+            .position(|s| s.id == id_for_blocking)
+            .ok_or_else(|| format!("Subscription with id {id_for_blocking} not found"))?;
+        subs[pos].last_updated_at = Some(now_unix_seconds());
+        subs[pos].last_server_count = Some(new_count);
+        let updated = subs[pos].clone();
+        storage::save_subscriptions(&app_for_blocking, &subs).map_err(|e| e.to_string())?;
+        Ok(updated)
+    })
+    .await
+    .map_err(|e| format!("storage task panicked: {e}"))??;
 
+    log::info!("refresh_subscription: returning success");
     Ok(SubscriptionRefresh {
         subscription: updated,
         servers: new_servers,

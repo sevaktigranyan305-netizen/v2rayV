@@ -194,7 +194,15 @@
 		<ThemeToggle />
 	</div>
 
-	<!-- Server list -->
+	<!-- Saved subscriptions (each renders its own servers underneath) -->
+	<SubscriptionList
+		subscriptions={subscriptions.subscriptions}
+		servers={servers.servers}
+		onRefresh={handleRefreshSubscription}
+		onDelete={handleDeleteSubscription}
+	/>
+
+	<!-- Manually-added servers (with edit/delete) -->
 	<div class="w-full">
 		<ServerList onEdit={openEdit} onAdd={openAdd} />
 	</div>
@@ -207,13 +215,6 @@
 		onExportJson={handleExportJson}
 		onExportUri={handleExportUri}
 		onToast={showToast}
-	/>
-
-	<!-- Saved subscriptions -->
-	<SubscriptionList
-		subscriptions={subscriptions.subscriptions}
-		onRefresh={handleRefreshSubscription}
-		onDelete={handleDeleteSubscription}
 	/>
 
 	<!-- Settings bar -->

@@ -1,17 +1,33 @@
 <script lang="ts">
-	import type { Subscription } from '$lib/types';
+	import { cn } from '$lib/utils';
+	import { serversStore } from '$lib/stores/servers.svelte';
+	import type { Subscription, ServerConfig } from '$lib/types';
 
 	interface Props {
 		subscriptions: Subscription[];
+		servers: ServerConfig[];
 		onRefresh: (id: string) => Promise<void>;
 		onDelete: (id: string, deleteServers: boolean) => Promise<void>;
 	}
 
-	const { subscriptions, onRefresh, onDelete }: Props = $props();
+	const { subscriptions, servers, onRefresh, onDelete }: Props = $props();
+
+	const store = serversStore;
 
 	// Per-row busy flag so spinners only spin on the row the user clicked.
 	let busyId = $state<string | null>(null);
 	let confirmDeleteId = $state<string | null>(null);
+
+	// Sort subscriptions by add time (oldest first). last_updated_at is also
+	// the creation time on first import, so it doubles as a created_at when
+	// a subscription has never been refreshed.
+	const sortedSubs = $derived(
+		[...subscriptions].sort((a, b) => (a.last_updated_at ?? 0) - (b.last_updated_at ?? 0))
+	);
+
+	function serversForSubscription(subId: string): ServerConfig[] {
+		return servers.filter((s) => s.subscription_id === subId);
+	}
 
 	function formatTimestamp(ts: number | null | undefined): string {
 		if (!ts) return 'never';
@@ -44,22 +60,22 @@
 	}
 </script>
 
-{#if subscriptions.length > 0}
-	<div class="w-full flex flex-col gap-1.5">
-		<h2 class="text-xs font-medium text-muted-foreground uppercase tracking-wide">Subscriptions</h2>
-		<ul class="flex flex-col gap-1.5">
-			{#each subscriptions as sub (sub.id)}
-				<li class="bg-card border border-border rounded-lg px-3 py-2 flex items-center gap-3">
+{#if sortedSubs.length > 0}
+	<div class="w-full flex flex-col gap-3">
+		{#each sortedSubs as sub (sub.id)}
+			{@const subServers = serversForSubscription(sub.id)}
+			<div class="w-full flex flex-col gap-1.5">
+				<!-- Subscription header (name + Refresh/Delete) -->
+				<div class="flex items-center justify-between gap-2 px-1">
 					<div class="flex-1 min-w-0">
-						<div class="text-sm text-foreground font-medium truncate">{sub.name}</div>
-						<div class="text-[11px] text-muted-foreground truncate font-mono">{sub.url}</div>
+						<div class="text-sm font-semibold text-foreground truncate">{sub.name}</div>
 						<div class="text-[11px] text-muted-foreground">
-							{sub.last_server_count ?? 0} server(s) · updated {formatTimestamp(sub.last_updated_at)}
+							{subServers.length} server(s) · updated {formatTimestamp(sub.last_updated_at)}
 						</div>
 					</div>
 
 					{#if confirmDeleteId === sub.id}
-						<div class="flex items-center gap-1.5">
+						<div class="flex items-center gap-1.5 shrink-0">
 							<button
 								onclick={() => handleDelete(sub.id, true)}
 								disabled={busyId === sub.id}
@@ -77,7 +93,9 @@
 								Keep servers
 							</button>
 							<button
-								onclick={() => { confirmDeleteId = null; }}
+								onclick={() => {
+									confirmDeleteId = null;
+								}}
 								disabled={busyId === sub.id}
 								class="text-[11px] text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded disabled:opacity-50"
 							>
@@ -85,7 +103,7 @@
 							</button>
 						</div>
 					{:else}
-						<div class="flex items-center gap-1.5">
+						<div class="flex items-center gap-1.5 shrink-0">
 							<button
 								onclick={() => handleRefresh(sub.id)}
 								disabled={busyId === sub.id}
@@ -95,7 +113,9 @@
 								{busyId === sub.id ? 'Refreshing…' : 'Refresh'}
 							</button>
 							<button
-								onclick={() => { confirmDeleteId = sub.id; }}
+								onclick={() => {
+									confirmDeleteId = sub.id;
+								}}
 								disabled={busyId === sub.id}
 								class="text-[11px] text-muted-foreground hover:text-destructive transition-colors px-2 py-1 rounded border border-border hover:border-destructive/40 disabled:opacity-50"
 								title="Delete subscription"
@@ -104,8 +124,40 @@
 							</button>
 						</div>
 					{/if}
-				</li>
-			{/each}
-		</ul>
+				</div>
+
+				<!-- Subscription's servers (no edit/delete — owned by the sub) -->
+				{#if subServers.length === 0}
+					<div class="text-xs text-muted-foreground italic px-3 py-2">
+						(no servers)
+					</div>
+				{:else}
+					<div class="flex flex-col gap-1">
+						{#each subServers as server (server.id)}
+							<div
+								class={cn(
+									'flex items-center justify-between rounded-lg px-3 py-2.5 border cursor-pointer transition-colors',
+									server.id === store.selectedId
+										? 'border-zinc-500 bg-zinc-800/60 text-foreground'
+										: 'border-transparent hover:border-zinc-700 hover:bg-zinc-800/30 text-foreground/70'
+								)}
+								onclick={() => store.selectServer(server.id)}
+								role="button"
+								tabindex="0"
+								onkeydown={(e) => e.key === 'Enter' && store.selectServer(server.id)}
+								aria-pressed={server.id === store.selectedId}
+							>
+								<div class="flex flex-col min-w-0">
+									<span class="text-sm font-medium truncate">{server.name}</span>
+									<span class="text-xs text-muted-foreground font-mono truncate">
+										{server.address}:{server.port}
+									</span>
+								</div>
+							</div>
+						{/each}
+					</div>
+				{/if}
+			</div>
+		{/each}
 	</div>
 {/if}
