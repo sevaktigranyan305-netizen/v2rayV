@@ -957,12 +957,10 @@ impl XrayManager {
         {
             let sc = { self.macos_child.lock().unwrap().take() };
             if let Some(sc) = sc {
-                if let Err(e) = macos_xray::stop_sudo_child(&sc) {
-                    // Propagate so the UI can show a real error instead
-                    // of silently transitioning to Disconnected while xray
-                    // is still alive in the background.
-                    return Err(e);
-                }
+                // Propagate so the UI can show a real error instead of
+                // silently transitioning to Disconnected while xray is
+                // still alive in the background.
+                macos_xray::stop_sudo_child(&sc)?;
             }
         }
         let t3 = std::time::Instant::now();
