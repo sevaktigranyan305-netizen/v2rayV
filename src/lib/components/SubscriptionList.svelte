@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { cn } from '$lib/utils';
 	import { serversStore } from '$lib/stores/servers.svelte';
+	import { subscriptionsStore } from '$lib/stores/subscriptions.svelte';
 	import type { Subscription, ServerConfig } from '$lib/types';
 
 	interface Props {
@@ -42,8 +43,28 @@
 
 	async function handleRefresh(id: string) {
 		busyId = id;
+		// Race the refresh against a 25-second watchdog. On the slow Parallels
+		// x86_64 emulation we have observed cases where the IPC response is
+		// delayed long after the backend has finished writing
+		// subscriptions.json, leaving the row stuck on "Refreshing…" until the
+		// app is restarted. The watchdog forces a manual store reload so the
+		// UI converges on the on-disk state even if the original promise
+		// never resolves.
+		const watchdog = new Promise<'timeout'>((resolve) =>
+			setTimeout(() => resolve('timeout'), 25000)
+		);
 		try {
-			await onRefresh(id);
+			const result = await Promise.race([
+				onRefresh(id).then(() => 'done' as const),
+				watchdog
+			]);
+			if (result === 'timeout') {
+				try {
+					await Promise.all([subscriptionsStore.load(), serversStore.load()]);
+				} catch {
+					// Ignore — the next user action will retry.
+				}
+			}
 		} finally {
 			busyId = null;
 		}

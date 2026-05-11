@@ -5,10 +5,9 @@
 
 	interface Props {
 		onEdit: (server: ServerConfig) => void;
-		onAdd: () => void;
 	}
 
-	const { onEdit, onAdd }: Props = $props();
+	const { onEdit }: Props = $props();
 
 	const store = serversStore;
 
@@ -19,16 +18,10 @@
 	const manualServers = $derived(store.servers.filter((s) => !s.subscription_id));
 </script>
 
+{#if manualServers.length > 0}
 <div class="w-full flex flex-col gap-1">
 	<div class="flex items-center justify-between mb-2">
-		<span class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Manual Servers</span>
-		<button
-			onclick={onAdd}
-			class="text-xs text-muted-foreground hover:text-foreground transition-colors px-2 py-1 rounded hover:bg-accent"
-			aria-label="Add server"
-		>
-			+ Add
-		</button>
+		<span class="text-xs font-semibold uppercase tracking-widest text-muted-foreground">Servers</span>
 	</div>
 
 	{#each manualServers as server (server.id)}
@@ -83,3 +76,4 @@
 		</div>
 	{/each}
 </div>
+{/if}

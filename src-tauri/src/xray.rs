@@ -31,6 +31,10 @@ pub struct XrayManager {
     bypass_domains: Arc<Mutex<Vec<String>>>,
     bypass_subnets: Arc<Mutex<Vec<String>>>,
     detected_vpns: Arc<Mutex<Vec<DetectedVpn>>>,
+    /// Whether the *current* connection is L3 (virtualnet). Set in `start`
+    /// and cleared in `stop_desktop` so that the stop path can skip
+    /// system-proxy disable / TUN cleanup that was never set up.
+    l3_mode: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for XrayManager {
@@ -52,6 +56,7 @@ impl XrayManager {
             bypass_domains: Arc::new(Mutex::new(Vec::new())),
             bypass_subnets: Arc::new(Mutex::new(Vec::new())),
             detected_vpns: Arc::new(Mutex::new(Vec::new())),
+            l3_mode: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -121,6 +126,8 @@ impl XrayManager {
         // hev-socks5-tunnel sidecar entirely. Threaded into the stdout
         // monitor and the Linux TUN launcher below so they branch on it.
         let l3_mode = config::virtualnet_enabled(server).is_some();
+        self.l3_mode
+            .store(l3_mode, std::sync::atomic::Ordering::Release);
 
         // Detect corporate VPN interfaces and bypass subnets
         let vpns = network::detect_vpn_routes();
@@ -462,7 +469,13 @@ impl XrayManager {
             }
         });
 
-        // Post-connection verification: check SOCKS proxy and traffic flow
+        // Post-connection verification: check SOCKS proxy and traffic flow.
+        // In L3 (virtualnet) mode there is no SOCKS5 inbound at all —
+        // xray-core's l3client owns the TUN and traffic never goes through
+        // 127.0.0.1:10808. Probing for a non-existent listener would just
+        // emit a misleading "SOCKS5 proxy NOT reachable" warning every
+        // single connect, so skip the verify thread entirely.
+        let verify_l3_mode = l3_mode;
         std::thread::spawn(move || {
             // Wait for connection to be established (up to 20s)
             for _ in 0..40 {
@@ -473,6 +486,10 @@ impl XrayManager {
             }
             if !started_flag_verify.load(std::sync::atomic::Ordering::Acquire) {
                 return; // Timeout thread already handled this
+            }
+            if verify_l3_mode {
+                info!("[verify] L3 mode active — skipping SOCKS5/system-proxy probes");
+                return;
             }
 
             // Step 1: Verify SOCKS5 proxy is reachable
@@ -692,10 +709,15 @@ impl XrayManager {
     }
 
     fn stop_desktop(&self) -> Result<(), AppError> {
+        let t0 = std::time::Instant::now();
+        let l3_mode = self.l3_mode.load(std::sync::atomic::Ordering::Acquire);
+
         // Stop TUN mode first (Linux only) — must happen before killing xray
-        // so hev-socks5-tunnel can cleanly shut down while SOCKS5 is still available
+        // so hev-socks5-tunnel can cleanly shut down while SOCKS5 is still
+        // available. In L3 mode no hev-socks5-tunnel was launched in the
+        // first place, so skip the cleanup.
         #[cfg(target_os = "linux")]
-        {
+        if !l3_mode {
             let config_dir = self
                 .config_path
                 .lock()
@@ -713,9 +735,17 @@ impl XrayManager {
                 }
             }
         }
+        let t1 = std::time::Instant::now();
 
-        // Disable system proxy
-        proxy::disable_system_proxy();
+        // Disable system proxy. In L3 mode we never enabled it (xray-core's
+        // l3client owns the TUN adapter and the OS resolver/proxy is
+        // untouched), so the registry write would just churn for nothing
+        // — skip it. On the slow Parallels x86_64 emulation this can
+        // shave several seconds off the user-visible disconnect time.
+        if !l3_mode {
+            proxy::disable_system_proxy();
+        }
+        let t2 = std::time::Instant::now();
 
         // Hard-kill the child process. tauri-plugin-shell's CommandChild::kill
         // delegates to shared_child, which on Windows uses TerminateProcess
@@ -738,6 +768,7 @@ impl XrayManager {
                 .map_err(|e| AppError::XrayProcess(format!("Failed to kill xray: {e}")))?;
             info!("Hard-killed xray process (pid={pid})");
         }
+        let t3 = std::time::Instant::now();
 
         // Clean up config file
         let config_path = {
@@ -750,7 +781,19 @@ impl XrayManager {
                 info!("Removed config file: {}", path.display());
             }
         }
+        let t4 = std::time::Instant::now();
 
+        self.l3_mode
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        info!(
+            "[stop] timings tun={:?} disable_proxy={:?} kill={:?} fs_cleanup={:?} total={:?}",
+            t1 - t0,
+            t2 - t1,
+            t3 - t2,
+            t4 - t3,
+            t4 - t0
+        );
         Ok(())
     }
 

@@ -56,11 +56,6 @@
 		await store.connectVpn(selected);
 	}
 
-	function openAdd() {
-		editingServer = null;
-		showForm = true;
-	}
-
 	function openEdit(server: ServerConfig) {
 		editingServer = server;
 		showForm = true;
@@ -189,8 +184,16 @@
 
 <div class="min-h-screen bg-background text-foreground flex flex-col p-4 gap-4 pb-safe">
 
-	<!-- App header (theme toggle only) -->
-	<div class="flex items-center justify-end pt-2">
+	<!-- App header: import/export + theme toggle -->
+	<div class="flex items-center justify-end gap-2 pt-2">
+		<ImportExportBar
+			onImportJson={handleImportJson}
+			onImportUri={handleImportUri}
+			onAddSubscription={handleAddSubscription}
+			onExportJson={handleExportJson}
+			onExportUri={handleExportUri}
+			onToast={showToast}
+		/>
 		<ThemeToggle />
 	</div>
 
@@ -204,18 +207,8 @@
 
 	<!-- Manually-added servers (with edit/delete) -->
 	<div class="w-full">
-		<ServerList onEdit={openEdit} onAdd={openAdd} />
+		<ServerList onEdit={openEdit} />
 	</div>
-
-	<!-- Import/Export toolbar -->
-	<ImportExportBar
-		onImportJson={handleImportJson}
-		onImportUri={handleImportUri}
-		onAddSubscription={handleAddSubscription}
-		onExportJson={handleExportJson}
-		onExportUri={handleExportUri}
-		onToast={showToast}
-	/>
 
 	<!-- Settings bar -->
 	<div class="flex items-center justify-between">
