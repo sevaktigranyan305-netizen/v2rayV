@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <!--
+    Common Controls v6 dependency. Required for Tauri's dialog APIs to
+    render correctly; this block must be preserved any time a custom
+    manifest replaces tauri-build's default.
+    See: https://docs.rs/tauri-build/latest/tauri_build/struct.WindowsAttributes.html
+  -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+
+  <!--
+    Request administrator privileges on every launch of v2rayV.exe.
+    Required because xray-core's wintun device backend creates a TUN
+    adapter via WintunCreateAdapter(), which fails with
+    ERROR_ACCESS_DENIED for a non-elevated process. Spawning xray.exe
+    as a sidecar inherits this token, so the child also gets admin and
+    the adapter comes up correctly.
+  -->
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="requireAdministrator" uiAccess="false" />
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
