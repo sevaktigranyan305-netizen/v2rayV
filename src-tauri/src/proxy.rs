@@ -1,5 +1,9 @@
+#[cfg(not(target_os = "macos"))]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
+use log::info;
+#[cfg(not(target_os = "macos"))]
 use log::{error, info};
 
 const SOCKS_HOST: &str = "127.0.0.1";
