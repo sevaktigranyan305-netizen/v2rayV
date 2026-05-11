@@ -147,8 +147,11 @@ impl XrayManager {
         {
             let mut guard = self.macos_child.lock().unwrap();
             if let Some(sc) = guard.take() {
-                let _ = macos_xray::stop_sudo_child(&sc);
-                info!("Killed stale sudo+xray process group");
+                if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                    warn!("Failed to kill stale sudo+xray process group: {e}");
+                } else {
+                    info!("Killed stale sudo+xray process group");
+                }
             }
         }
 
@@ -826,7 +829,9 @@ impl XrayManager {
                     drop(s);
                     let sc = { timeout_macos_child.lock().unwrap().take() };
                     if let Some(sc) = sc {
-                        let _ = macos_xray::stop_sudo_child(&sc);
+                        if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                            warn!("Timeout watchdog: failed to kill sudo+xray: {e}");
+                        }
                     }
                     let _ = timeout_app.emit("connection-status-changed", "disconnected");
                 }
@@ -952,7 +957,12 @@ impl XrayManager {
         {
             let sc = { self.macos_child.lock().unwrap().take() };
             if let Some(sc) = sc {
-                let _ = macos_xray::stop_sudo_child(&sc);
+                if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                    // Propagate so the UI can show a real error instead
+                    // of silently transitioning to Disconnected while xray
+                    // is still alive in the background.
+                    return Err(e);
+                }
             }
         }
         let t3 = std::time::Instant::now();
