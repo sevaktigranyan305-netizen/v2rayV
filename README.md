@@ -3,7 +3,7 @@
 [![Release](https://img.shields.io/github/v/release/sevaktigranyan305-netizen/v2rayV?display_name=tag)](https://github.com/sevaktigranyan305-netizen/v2rayV/releases)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-Cross-platform desktop VPN client for my xray-core fork. Built with **Tauri v2**, **Svelte 5**, and a fork of **xray-core**.
+Cross-platform desktop VPN client for my xray-core fork. Built with **Tauri v2** and **Svelte 5**
 
 ---
 
