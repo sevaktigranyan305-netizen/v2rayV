@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { open, save } from '@tauri-apps/plugin-dialog';
 	import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+	import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 	import UriInputModal from './UriInputModal.svelte';
 	import SubscriptionModal from './SubscriptionModal.svelte';
 
@@ -92,7 +93,13 @@
 		try {
 			const uri = await onExportUri();
 			if (uri === null) return;
-			await navigator.clipboard.writeText(uri);
+			// Use the Tauri clipboard plugin instead of navigator.clipboard.
+			// On macOS WebKit the latter requires a fresh "user activation"
+			// gesture — the await on onExportUri (which crosses Tauri IPC)
+			// consumes that activation, so writeText is rejected with
+			// "NotAllowedError". The Rust-side plugin bypasses that check
+			// because it talks to AppKit directly.
+			await writeText(uri);
 			onToast('vless:// URI copied to clipboard');
 		} catch (e) {
 			onToast(`Copy failed: ${e}`, 'error');

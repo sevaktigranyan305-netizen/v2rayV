@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { writeText } from '@tauri-apps/plugin-clipboard-manager';
 	import { getLogs, clearLogs } from '$lib/api/tauri';
 	import type { LogEntry } from '$lib/types';
 
@@ -63,7 +64,10 @@
 		});
 		const text = lines.join('\n');
 		try {
-			await navigator.clipboard.writeText(text);
+			// Use the Tauri clipboard plugin for consistency with the rest
+			// of the app (see ImportExportBar.copyVlessUri for the macOS
+			// rationale).
+			await writeText(text);
 			flashCopyState('copied');
 		} catch {
 			flashCopyState('error');
