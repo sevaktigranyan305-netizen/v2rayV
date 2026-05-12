@@ -93,10 +93,11 @@ export interface PlatformInfo {
  * - `Ok` — xray-core was spawned; the connection-info poll loop will
  *   pick up the actual status (Connecting → Connected, or Error if the
  *   server is unreachable).
- * - `NeedsSudoPassword` — macOS only. The backend cannot spawn xray
- *   under sudo because the user's password is not in Keychain yet.
- *   The UI must show its sudo-password modal, call
- *   `macosStoreSudoPassword`, then retry `connect`.
+ * - `NeedsSudoPassword` — macOS / Linux only. The backend cannot
+ *   spawn xray under sudo because the user's password is not in the
+ *   OS credential store yet (Keychain on macOS, Secret Service on
+ *   Linux). The UI must show its sudo-password modal, call
+ *   `storeSudoPassword`, then retry `connect`.
  */
 export type ConnectOutcome =
 	| { kind: 'Ok' }

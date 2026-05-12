@@ -1,12 +1,12 @@
 pub mod commands;
 pub mod config;
-#[cfg(target_os = "macos")]
-pub mod macos_helper;
-#[cfg(target_os = "macos")]
-pub mod macos_xray;
 pub mod models;
 pub mod network;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod priv_xray;
 pub mod proxy;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod secret_store;
 pub mod storage;
 pub mod subscription;
 pub mod tray;
@@ -176,9 +176,9 @@ pub fn run() {
             uri::parse_vless_uri_cmd,
             uri::export_vless_uri,
             commands::detect_vpn_interfaces,
-            commands::macos_has_sudo_password,
-            commands::macos_store_sudo_password,
-            commands::macos_clear_sudo_password,
+            commands::has_sudo_password,
+            commands::store_sudo_password,
+            commands::clear_sudo_password,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

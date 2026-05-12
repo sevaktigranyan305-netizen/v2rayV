@@ -1,8 +1,9 @@
-//! macOS-specific spawn path for xray-core. Runs xray under `sudo -S`
-//! so it can claim a `utun` device for L3 mode, and exposes the same
+//! Privileged spawn path for xray-core on Unix desktops. Runs xray
+//! under `sudo -S` so it can claim the platform's TUN device for L3
+//! mode (utun on macOS, /dev/net/tun on Linux), and exposes the same
 //! "monitor stdout for 'started' / push log lines / emit terminate
-//! events" surface that the cross-platform sidecar path in `xray.rs`
-//! uses on Windows and Linux.
+//! events" surface that the cross-platform Tauri-sidecar path in
+//! `xray.rs` uses on Windows.
 
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
@@ -17,12 +18,13 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 use crate::models::{AppError, ConnectionInfo, ConnectionStatus, LogEntry};
 
-/// Locate the bundled xray sidecar binary. In a production .app bundle
-/// Tauri places sidecars next to the main executable inside
-/// `Contents/MacOS/`, named with the target triple suffix. In `pnpm
+/// Locate the bundled xray sidecar binary. In a production install
+/// Tauri places sidecars next to the main executable (inside
+/// `Contents/MacOS/` on macOS, in the install directory or AppImage
+/// usr/bin on Linux), named with the target-triple suffix. In `pnpm
 /// tauri dev` mode the bundled copy lives under
-/// `src-tauri/binaries/`. We look in the production location first and
-/// fall back to dev only if needed.
+/// `src-tauri/binaries/`. We look in the production location first
+/// and fall back to dev only if needed.
 pub fn locate_xray_binary() -> Result<std::path::PathBuf, AppError> {
     let triple = xray_target_triple();
     let exe = std::env::current_exe()
@@ -59,16 +61,24 @@ pub fn locate_xray_binary() -> Result<std::path::PathBuf, AppError> {
 }
 
 /// Tauri-style target-triple suffix used on the sidecar file name. We
-/// pick this at compile time so a universal build still does the right
-/// thing per slice.
+/// pick this at compile time so a universal build still does the
+/// right thing per slice.
 const fn xray_target_triple() -> &'static str {
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
         "aarch64-apple-darwin"
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
     {
         "x86_64-apple-darwin"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    {
+        "x86_64-unknown-linux-gnu"
+    }
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    {
+        "aarch64-unknown-linux-gnu"
     }
 }
 
@@ -245,13 +255,13 @@ pub fn spawn_xray_sudo<R: Runtime>(
                     || low.contains("3 incorrect password attempts")
                 {
                     warn!("sudo rejected the stored password");
-                    if let Err(e) = crate::macos_helper::delete_password() {
-                        warn!("Failed to clear stale Keychain entry: {e}");
+                    if let Err(e) = crate::secret_store::delete_password() {
+                        warn!("Failed to clear stale credential store entry: {e}");
                     }
                     push_log_entry(
                         &logs,
                         "error",
-                        "Stored macOS password is no longer valid — \
+                        "Saved sudo password is no longer valid — \
                          please re-enter it next time you connect.",
                     );
                     let _ = app.emit("sudo-auth-failed", ());
@@ -394,11 +404,11 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
         }
     }
 
-    let password = crate::macos_helper::read_password().ok_or_else(|| {
+    let password = crate::secret_store::read_password().ok_or_else(|| {
         AppError::XrayProcess(
-            "Cannot kill root-owned xray: no sudo password in Keychain. \
-             The xray process may need to be killed manually with \
-             `sudo killall xray`."
+            "Cannot kill root-owned xray: no sudo password in the OS \
+             credential store. The xray process may need to be killed \
+             manually with `sudo killall xray`."
                 .to_string(),
         )
     })?;
@@ -435,12 +445,12 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
     // The "already gone" case is a perfectly valid disconnect
     // outcome (xray died on its own), so accept 0 and 1.
     //
-    // BUT there's an extra wrinkle on macOS: `pkill -f <xray_path>`
-    // also matches its own `sudo` wrapper, because sudo's argv
-    // includes the xray path as one of its arguments (`-f` matches
-    // the full cmdline as a regex). When pkill signals its parent
-    // sudo, sudo is killed by SIGKILL before exiting normally, and
-    // our `wait_with_output` reports `code = None` (signal-killed)
+    // BUT there's an extra wrinkle: `pkill -f <xray_path>` also
+    // matches its own `sudo` wrapper, because sudo's argv includes
+    // the xray path as one of its arguments (`-f` matches the full
+    // cmdline as a regex). When pkill signals its parent sudo, sudo
+    // is killed by SIGKILL before exiting normally, and our
+    // `wait_with_output` reports `code = None` (signal-killed)
     // instead of a numeric exit status. By the time pkill walks
     // through PIDs in order, the lower-PID xray has already been
     // signalled, so xray IS dead — we just lost visibility into the
@@ -457,20 +467,21 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
             stderr.trim()
         );
 
-        // If sudo rejected the password, the Keychain entry is stale
-        // (user changed their macOS password while connected). Wipe
-        // it so the next connect surfaces the modal. We can't kill
-        // xray ourselves — point the user at manual recovery.
+        // If sudo rejected the password, the saved credential is
+        // stale (user changed their account password while
+        // connected). Wipe it so the next connect surfaces the
+        // modal. We can't kill xray ourselves — point the user at
+        // manual recovery.
         let low = stderr.to_lowercase();
         if low.contains("incorrect password attempt")
             || low.contains("sorry, try again")
             || low.contains("3 incorrect password attempts")
         {
-            if let Err(e) = crate::macos_helper::delete_password() {
-                warn!("Failed to clear stale Keychain entry: {e}");
+            if let Err(e) = crate::secret_store::delete_password() {
+                warn!("Failed to clear stale credential store entry: {e}");
             }
             return Err(AppError::XrayProcess(
-                "Saved macOS password is no longer valid. The xray \
+                "Saved sudo password is no longer valid. The xray \
                  process is still running and must be killed manually \
                  with `sudo killall xray`. You'll be re-prompted for \
                  your password on the next connect."

@@ -50,10 +50,30 @@ Both modes use the same underlying VLESS+REALITY transport — only the local ed
 | Platform | TUN backend            | Privileges                                                                                                                       |
 | -------- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
 | Windows  | wintun                 | The installer triggers a UAC prompt on every launch (manifest declares `requireAdministrator`). Required by `WintunCreateAdapter`. |
-| macOS    | utun                   | xray needs root to claim a utun index. Run via `sudo` or wire up a privileged helper in your fork.                                |
-| Linux    | xray native TUN / hev | Either run xray with `CAP_NET_ADMIN`, or stay in legacy SOCKS-only mode with the bundled `v2rayv-helper` (pkexec) for `hev-socks5-tunnel`. |
+| macOS    | utun                   | xray runs under `sudo -S`; the password is captured once via a modal and persisted in the login Keychain.                          |
+| Linux    | /dev/net/tun           | xray runs under `sudo -S`; the password is captured once via a modal and persisted in the Secret Service.                          |
 
 `wintun.dll` (v0.14, WireGuard) is bundled inside the Windows installer and copied next to `xray.exe` at first launch by `ensure_wintun_next_to_exe()` so the loader can find it.
+
+### Linux runtime requirements
+
+The L3 spawn path persists the sudo password in the OS credential
+store via the Secret Service D-Bus protocol. Most desktop
+environments ship a provider out of the box (GNOME Keyring on
+GNOME/Cinnamon/XFCE, KWallet on KDE). Minimal/tiling-WM setups
+(Hyprland, Sway, i3, niri, …) often have none — install one of the
+providers below before launching v2rayV, otherwise the password
+modal will keep re-appearing on every connect.
+
+| Distribution    | Required packages                                          |
+| --------------- | ---------------------------------------------------------- |
+| Debian / Ubuntu | `libsecret-1-0 gnome-keyring procps` (or `kwalletmanager`) |
+| Fedora / RHEL   | `libsecret gnome-keyring procps-ng`                        |
+| Arch / Manjaro  | `libsecret gnome-keyring procps-ng`                        |
+
+`procps` provides `pkill`, which the disconnect path uses to signal
+the root-owned xray process. `sudo` (from any standard distribution)
+is also required.
 
 ---
 

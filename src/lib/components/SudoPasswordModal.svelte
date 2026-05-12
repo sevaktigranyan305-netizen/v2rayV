@@ -1,9 +1,10 @@
 <script lang="ts">
-	import { macosStoreSudoPassword } from '$lib/api/tauri';
+	import { storeSudoPassword } from '$lib/api/tauri';
 
 	interface Props {
 		/** Called after the password validated against `sudo -v` and was
-		 * persisted to Keychain. The caller typically re-runs
+		 * persisted to the OS credential store (Keychain on macOS,
+		 * Secret Service on Linux). The caller typically re-runs
 		 * `connectVpn` here. */
 		onSuccess: () => void;
 		/** Called when the user explicitly cancels the prompt (Esc /
@@ -22,13 +23,13 @@
 		if (busy) return;
 		const trimmed = password;
 		if (!trimmed) {
-			error = 'Please enter your macOS password';
+			error = 'Please enter your sudo password';
 			return;
 		}
 		busy = true;
 		error = '';
 		try {
-			await macosStoreSudoPassword(trimmed);
+			await storeSudoPassword(trimmed);
 			password = '';
 			onSuccess();
 		} catch (err) {
@@ -60,11 +61,11 @@
 		class="w-full max-w-md mx-4 bg-card border border-border rounded-xl shadow-2xl overflow-hidden"
 		role="dialog"
 		aria-modal="true"
-		aria-label="Enter macOS password"
+		aria-label="Enter sudo password"
 		tabindex="-1"
 	>
 		<div class="flex items-center justify-between px-5 py-4 border-b border-border">
-			<h2 class="text-base font-semibold text-foreground">macOS password</h2>
+			<h2 class="text-base font-semibold text-foreground">Sudo password</h2>
 			<button
 				onclick={onCancel}
 				disabled={busy}
@@ -90,10 +91,11 @@
 
 		<form onsubmit={submit} class="px-5 py-4 flex flex-col gap-4">
 			<p class="text-sm text-muted-foreground leading-relaxed">
-				v2rayV needs your macOS account password once so it can run
-				xray-core with the privileges required to create the L3 (utun)
-				network interface. The password is stored in your login Keychain
-				and is not transmitted anywhere.
+				v2rayV needs your account's sudo password once so it can run
+				xray-core with the privileges required to create the L3 TUN
+				network interface. The password is stored in your OS credential
+				store (login Keychain on macOS, Secret Service on Linux) and is
+				not transmitted anywhere.
 			</p>
 
 			<div class="flex flex-col gap-1">
