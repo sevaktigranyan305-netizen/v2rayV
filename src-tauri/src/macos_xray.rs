@@ -336,6 +336,17 @@ pub fn spawn_xray_sudo<R: Runtime>(
 /// returns EPERM. When that happens we re-elevate via `sudo -S kill -9
 /// -<pgid>` using the cached Keychain password — the negative pid tells
 /// `kill(1)` to target the entire group at once.
+///
+/// KNOWN LIMITATION: if the user changes their macOS account password
+/// while connected, the cached Keychain entry becomes stale. Disconnect
+/// then can't elevate (sudo rejects the stale password), so the xray
+/// process is leaked. The returned `Err` includes manual recovery
+/// instructions (`sudo killall xray`). Mitigations:
+///   1. The stderr handler in `spawn_xray_sudo` proactively wipes the
+///      stale Keychain entry the moment sudo's "Sorry, try again" hits,
+///      which catches the much more common spawn-time auth failure.
+///   2. A future iteration should use a privileged SMAppService daemon
+///      so kill no longer needs the user's password at all.
 pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
     // SAFETY: killpg with a positive pgid only signals processes in
     // that group; it cannot affect anything else in this process.
@@ -396,6 +407,28 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         warn!("sudo kill exited with {}: {}", output.status, stderr.trim());
+
+        // If sudo rejected the password, the Keychain entry is stale
+        // (user changed their macOS password while connected). Wipe it
+        // so the next connect surfaces the modal. We can't kill xray
+        // ourselves — point the user at manual recovery in the error.
+        let low = stderr.to_lowercase();
+        if low.contains("incorrect password attempt")
+            || low.contains("sorry, try again")
+            || low.contains("3 incorrect password attempts")
+        {
+            if let Err(e) = crate::macos_helper::delete_password() {
+                warn!("Failed to clear stale Keychain entry: {e}");
+            }
+            return Err(AppError::XrayProcess(
+                "Saved macOS password is no longer valid. The xray \
+                 process is still running and must be killed manually \
+                 with `sudo killall xray`. You'll be re-prompted for \
+                 your password on the next connect."
+                    .to_string(),
+            ));
+        }
+
         return Err(AppError::XrayProcess(format!(
             "sudo kill failed ({}): {}",
             output.status,

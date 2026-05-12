@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { connectionStore } from '$lib/stores/connection.svelte';
 	import { serversStore } from '$lib/stores/servers.svelte';
 	import { settingsStore } from '$lib/stores/settings.svelte';
@@ -72,8 +73,15 @@
 		showSudoModal = false;
 		const server = pendingServer;
 		pendingServer = null;
-		if (server) {
-			await store.connectVpn(server);
+		if (!server) return;
+		// On the off chance the freshly-saved password got wiped between
+		// write_password and has_password() (e.g. a concurrent
+		// sudo-auth-failed event), surface the modal again instead of
+		// silently swallowing the NeedsSudoPassword outcome.
+		const outcome = await store.connectVpn(server);
+		if (outcome === 'needs-sudo-password') {
+			pendingServer = server;
+			showSudoModal = true;
 		}
 	}
 
@@ -180,6 +188,14 @@
 		}
 	}
 
+	// Subscription to the backend's `sudo-auth-failed` event so the
+	// stale-password disconnect path immediately re-prompts instead of
+	// leaving the user with a cryptic "xray exited" error and forcing
+	// them to click Connect again. The backend already wipes the
+	// Keychain entry before emitting, so all we have to do here is open
+	// the modal against whatever server was last selected.
+	let unlistenSudoAuthFailed: UnlistenFn | null = null;
+
 	onMount(async () => {
 		try {
 			await servers.load();
@@ -200,11 +216,29 @@
 		}
 		store.refresh();
 		store.startPolling();
+
+		try {
+			unlistenSudoAuthFailed = await listen('sudo-auth-failed', () => {
+				const selected = servers.selectedServer;
+				if (!selected) return;
+				pendingServer = selected;
+				showSudoModal = true;
+				showToast(
+					'Saved macOS password is no longer valid — please re-enter it.',
+					'error'
+				);
+			});
+		} catch (e) {
+			// Non-macOS builds don't emit this event, so a missing listener
+			// is fine — just log so we'd notice if the call itself broke.
+			console.warn('sudo-auth-failed listener registration failed:', e);
+		}
 	});
 
 	onDestroy(() => {
 		store.stopPolling();
 		if (toastTimer !== null) clearTimeout(toastTimer);
+		unlistenSudoAuthFailed?.();
 	});
 </script>
 
