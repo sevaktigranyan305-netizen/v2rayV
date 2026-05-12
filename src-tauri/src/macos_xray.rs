@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -73,12 +73,20 @@ const fn xray_target_triple() -> &'static str {
 }
 
 /// Handle returned from `spawn_xray_sudo` and stored on `XrayManager`
-/// while a connection is active. The only thing we keep around is the
-/// process group id; the actual `std::process::Child` is owned by the
-/// background wait thread so it can detect spontaneous xray crashes
-/// without needing to grab a mutex.
+/// while a connection is active. We keep around:
+///   * `pgid`  — the process group of the sudo wrapper, used for the
+///     cheap cleanup of the sudo process itself.
+///   * `xray_path` — the absolute path to the bundled xray binary,
+///     used as the `pkill -f` pattern on disconnect (see
+///     `stop_sudo_child` for why we can't just signal the process
+///     group).
+///
+/// The actual `std::process::Child` is owned by the background wait
+/// thread so it can detect spontaneous xray crashes without needing
+/// to grab a mutex.
 pub struct SudoChild {
     pub pgid: i32,
+    pub xray_path: PathBuf,
 }
 
 /// Spawn xray under `sudo -S` with the supplied password and wire up
@@ -321,58 +329,68 @@ pub fn spawn_xray_sudo<R: Runtime>(
         });
     }
 
-    Ok(SudoChild { pgid })
+    Ok(SudoChild {
+        pgid,
+        xray_path: xray_path.to_path_buf(),
+    })
 }
 
-/// Stop a sudo-rooted xray child by SIGKILL-ing its whole process
-/// group. The wait thread launched in `spawn_xray_sudo` will observe
-/// the exit on its own and update state / emit the disconnect event.
-/// Idempotent: if the group is already gone (ESRCH) we treat that as
+/// Stop a sudo-rooted xray child. This is harder than it looks on
+/// macOS, for two reasons:
+///
+///   1. xray is `setuid(0)` because sudo ran it. A signal from our
+///      non-root GUI process returns EPERM. We must re-elevate via
+///      `sudo -S kill ...` using the cached Keychain password.
+///
+///   2. Modern macOS sudo runs the command under a pty monitor that
+///      calls `setsid()` on the actual command process — so xray ends
+///      up in a NEW process group and a NEW session, distinct from
+///      the pgid we captured at spawn time. That means
+///      `killpg(captured_pgid)` only kills the sudo wrapper; xray
+///      survives as an orphan re-parented to launchd and keeps the
+///      VPN tunnel up. This was the root cause of the
+///      "disconnect-but-still-connected" bug observed on macOS L3.
+///
+/// The fix is to target xray by its absolute binary path with
+/// `pkill -9 -f <xray_path>`. The path lives inside our `.app`
+/// bundle and is unique enough that we won't accidentally signal a
+/// user-managed xray instance running from a different prefix.
+/// We still SIGKILL the captured process group as cheap cleanup so
+/// the sudo wrapper doesn't linger.
+///
+/// The wait thread launched in `spawn_xray_sudo` observes the sudo
+/// wrapper's exit and drives the state / disconnect event. The kill
+/// is idempotent: if the target is already gone we treat that as
 /// success.
 ///
-/// Tricky bit: because `sudo` ran `setuid(0)` before exec'ing xray, the
-/// whole process group is owned by root. A non-root sender cannot
-/// signal a root target, so the cheap `killpg` from our GUI-user process
-/// returns EPERM. When that happens we re-elevate via `sudo -S kill -9
-/// -<pgid>` using the cached Keychain password — the negative pid tells
-/// `kill(1)` to target the entire group at once.
-///
 /// KNOWN LIMITATION: if the user changes their macOS account password
-/// while connected, the cached Keychain entry becomes stale. Disconnect
-/// then can't elevate (sudo rejects the stale password), so the xray
-/// process is leaked. The returned `Err` includes manual recovery
-/// instructions (`sudo killall xray`). Mitigations:
-///   1. The stderr handler in `spawn_xray_sudo` proactively wipes the
-///      stale Keychain entry the moment sudo's "Sorry, try again" hits,
-///      which catches the much more common spawn-time auth failure.
-///   2. A future iteration should use a privileged SMAppService daemon
-///      so kill no longer needs the user's password at all.
+/// while connected, the cached Keychain entry becomes stale.
+/// Disconnect then can't elevate (sudo rejects the stale password),
+/// so the xray process is leaked. The returned `Err` includes manual
+/// recovery instructions (`sudo killall xray`). Mitigations:
+///   1. The stderr handler in `spawn_xray_sudo` proactively wipes
+///      the stale Keychain entry the moment sudo's "Sorry, try
+///      again" hits, which catches the much more common spawn-time
+///      auth failure.
+///   2. A future iteration should use a privileged SMAppService
+///      daemon so kill no longer needs the user's password at all.
 pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
-    // SAFETY: killpg with a positive pgid only signals processes in
-    // that group; it cannot affect anything else in this process.
-    let raw_err = unsafe {
-        if libc::killpg(sc.pgid, libc::SIGKILL) == 0 {
-            info!("SIGKILL'd sudo+xray process group {}", sc.pgid);
-            return Ok(());
-        }
-        std::io::Error::last_os_error()
-    };
-
-    match raw_err.raw_os_error() {
-        Some(libc::ESRCH) => {
-            info!("sudo+xray process group {} already gone", sc.pgid);
-            return Ok(());
-        }
-        Some(libc::EPERM) => {
-            // Expected when xray is running as root; fall through to
-            // the sudo-elevated kill below.
-        }
-        _ => {
-            warn!("killpg({}) failed unexpectedly: {raw_err}", sc.pgid);
-            return Err(AppError::XrayProcess(format!(
-                "killpg({}) failed: {raw_err}",
-                sc.pgid
-            )));
+    // Cheap cleanup of the sudo wrapper. We don't really care if it
+    // succeeds because the real xray we kill below — this just keeps
+    // the captured pgid from lingering on EPERM/ESRCH paths. SAFETY:
+    // killpg with a positive pgid only signals processes in that
+    // group; it cannot affect anything else in this process.
+    unsafe {
+        let rc = libc::killpg(sc.pgid, libc::SIGKILL);
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            // EPERM (root-owned) and ESRCH (already gone) are both
+            // expected and don't tell us anything about whether xray
+            // itself is alive.
+            match err.raw_os_error() {
+                Some(libc::EPERM) | Some(libc::ESRCH) => {}
+                _ => warn!("killpg({}) returned unexpected error: {err}", sc.pgid),
+            }
         }
     }
 
@@ -385,33 +403,52 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
         )
     })?;
 
+    let xray_path_str = sc.xray_path.to_string_lossy().to_string();
+    info!(
+        "Killing xray via sudo pkill -f {} (captured sudo pgid {})",
+        xray_path_str, sc.pgid
+    );
+
     let mut child = Command::new("sudo")
-        .args(["-S", "-p", "", "kill", "-9", &format!("-{}", sc.pgid)])
+        .args(["-S", "-p", "", "pkill", "-9", "-f", &xray_path_str])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| AppError::XrayProcess(format!("Failed to spawn sudo kill: {e}")))?;
+        .map_err(|e| AppError::XrayProcess(format!("Failed to spawn sudo pkill: {e}")))?;
 
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = writeln!(stdin, "{password}") {
-            warn!("Failed to write password to sudo kill stdin: {e}");
+            warn!("Failed to write password to sudo pkill stdin: {e}");
         }
         drop(stdin);
     }
 
     let output = child
         .wait_with_output()
-        .map_err(|e| AppError::XrayProcess(format!("waiting for sudo kill failed: {e}")))?;
+        .map_err(|e| AppError::XrayProcess(format!("waiting for sudo pkill failed: {e}")))?;
 
-    if !output.status.success() {
+    // pkill exit codes: 0 — one or more matched and signalled;
+    //                   1 — nothing matched (i.e. xray already gone);
+    //                   2 — syntax error;
+    //                   3 — fatal error.
+    // The "already gone" case is a perfectly valid disconnect
+    // outcome (xray died on its own), so accept 0 and 1.
+    let code = output.status.code();
+    let success = matches!(code, Some(0) | Some(1));
+
+    if !success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        warn!("sudo kill exited with {}: {}", output.status, stderr.trim());
+        warn!(
+            "sudo pkill exited with {}: {}",
+            output.status,
+            stderr.trim()
+        );
 
         // If sudo rejected the password, the Keychain entry is stale
-        // (user changed their macOS password while connected). Wipe it
-        // so the next connect surfaces the modal. We can't kill xray
-        // ourselves — point the user at manual recovery in the error.
+        // (user changed their macOS password while connected). Wipe
+        // it so the next connect surfaces the modal. We can't kill
+        // xray ourselves — point the user at manual recovery.
         let low = stderr.to_lowercase();
         if low.contains("incorrect password attempt")
             || low.contains("sorry, try again")
@@ -430,15 +467,16 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
         }
 
         return Err(AppError::XrayProcess(format!(
-            "sudo kill failed ({}): {}",
+            "sudo pkill failed ({}): {}",
             output.status,
             stderr.trim()
         )));
     }
 
-    info!(
-        "SIGKILL'd sudo+xray process group {} via sudo elevation",
-        sc.pgid
-    );
+    if code == Some(1) {
+        info!("xray was already gone (pkill matched nothing)");
+    } else {
+        info!("SIGKILL'd xray via sudo pkill -f {}", xray_path_str);
+    }
     Ok(())
 }
