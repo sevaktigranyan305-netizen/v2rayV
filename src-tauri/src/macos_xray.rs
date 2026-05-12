@@ -434,8 +434,20 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
     //                   3 — fatal error.
     // The "already gone" case is a perfectly valid disconnect
     // outcome (xray died on its own), so accept 0 and 1.
+    //
+    // BUT there's an extra wrinkle on macOS: `pkill -f <xray_path>`
+    // also matches its own `sudo` wrapper, because sudo's argv
+    // includes the xray path as one of its arguments (`-f` matches
+    // the full cmdline as a regex). When pkill signals its parent
+    // sudo, sudo is killed by SIGKILL before exiting normally, and
+    // our `wait_with_output` reports `code = None` (signal-killed)
+    // instead of a numeric exit status. By the time pkill walks
+    // through PIDs in order, the lower-PID xray has already been
+    // signalled, so xray IS dead — we just lost visibility into the
+    // numeric pkill exit code. Treat None the same as "0 or 1": a
+    // valid disconnect outcome.
     let code = output.status.code();
-    let success = matches!(code, Some(0) | Some(1));
+    let success = matches!(code, Some(0) | Some(1)) || code.is_none();
 
     if !success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -473,10 +485,13 @@ pub fn stop_sudo_child(sc: &SudoChild) -> Result<(), AppError> {
         )));
     }
 
-    if code == Some(1) {
-        info!("xray was already gone (pkill matched nothing)");
-    } else {
-        info!("SIGKILL'd xray via sudo pkill -f {}", xray_path_str);
+    match code {
+        Some(1) => info!("xray was already gone (pkill matched nothing)"),
+        None => info!(
+            "SIGKILL'd xray via sudo pkill -f {} (sudo wrapper also signal-killed by its own pkill)",
+            xray_path_str
+        ),
+        _ => info!("SIGKILL'd xray via sudo pkill -f {}", xray_path_str),
     }
     Ok(())
 }
