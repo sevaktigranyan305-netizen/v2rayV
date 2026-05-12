@@ -3,6 +3,11 @@
   "bundle": {
     "resources": [
       "binaries/wintun.dll"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installerHooks": "./windows/installer-hooks.nsi"
+      }
+    }
   }
 }

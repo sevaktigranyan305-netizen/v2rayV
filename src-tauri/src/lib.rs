@@ -56,6 +56,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             app.handle().plugin(tauri_plugin_shell::init())?;
 
@@ -103,13 +104,29 @@ pub fn run() {
 
             tray::setup_tray(&handle)?;
 
-            // Hide to tray instead of closing
+            // Hide to tray instead of closing. On macOS we additionally
+            // demote the app to ActivationPolicy::Accessory so it
+            // vanishes from the Dock and the menu bar (matching the
+            // Windows behavior where the taskbar entry disappears when
+            // the window closes). The tray's "Show Window" handler
+            // and left-click handler flip the policy back to Regular
+            // before showing the window again.
             let window = app.get_webview_window("main").unwrap();
             let window_clone = window.clone();
+            #[cfg(target_os = "macos")]
+            let close_handle = app.handle().clone();
             window.on_window_event(move |event| {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window_clone.hide();
+                    #[cfg(target_os = "macos")]
+                    {
+                        if let Err(e) =
+                            close_handle.set_activation_policy(tauri::ActivationPolicy::Accessory)
+                        {
+                            log::warn!("Failed to set Accessory activation policy: {e}");
+                        }
+                    }
                 }
             });
 

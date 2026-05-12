@@ -364,39 +364,68 @@ pub async fn refresh_subscription<R: Runtime>(
         return Err("No vless:// servers found in subscription".to_string());
     }
 
-    let new_servers: Vec<ServerConfig> = parsed
-        .into_iter()
-        .map(|mut s| {
-            s.id = uuid::Uuid::new_v4().to_string();
-            s.subscription_id = Some(id.clone());
-            s
-        })
-        .collect();
-
     let app_for_blocking = app.clone();
     let id_for_blocking = id.clone();
-    let new_servers_for_blocking = new_servers.clone();
-    let updated = tauri::async_runtime::spawn_blocking(move || -> Result<Subscription, String> {
-        // Replace every server tagged with this subscription id with the
-        // freshly-imported set. Manually-added servers (subscription_id ==
-        // None) and servers from other subscriptions are left alone.
-        let mut servers = storage::load_servers(&app_for_blocking).map_err(|e| e.to_string())?;
-        servers.retain(|s| s.subscription_id.as_deref() != Some(id_for_blocking.as_str()));
-        let new_count = new_servers_for_blocking.len() as u32;
-        servers.extend(new_servers_for_blocking);
-        storage::save_servers(&app_for_blocking, &servers).map_err(|e| e.to_string())?;
+    // All storage I/O — including the ID-preservation lookup — runs on
+    // a blocking thread. Doing the lookup on the async runtime worker
+    // can leave the IPC response pending forever on Windows (see the
+    // matching note in `add_subscription`).
+    let (updated, new_servers) = tauri::async_runtime::spawn_blocking(
+        move || -> Result<(Subscription, Vec<ServerConfig>), String> {
+            let mut servers =
+                storage::load_servers(&app_for_blocking).map_err(|e| e.to_string())?;
 
-        let mut subs = storage::load_subscriptions(&app_for_blocking).map_err(|e| e.to_string())?;
-        let pos = subs
-            .iter()
-            .position(|s| s.id == id_for_blocking)
-            .ok_or_else(|| format!("Subscription with id {id_for_blocking} not found"))?;
-        subs[pos].last_updated_at = Some(now_unix_seconds());
-        subs[pos].last_server_count = Some(new_count);
-        let updated = subs[pos].clone();
-        storage::save_subscriptions(&app_for_blocking, &subs).map_err(|e| e.to_string())?;
-        Ok(updated)
-    })
+            // Preserve internal IDs across refresh: a server in the
+            // freshly-fetched batch that matches an existing server
+            // on (address, port, vless-uuid) is the same server from
+            // the user's point of view (name may have been edited in
+            // the panel), so we reuse the old internal ID. Without
+            // this every refresh would hand out brand-new UUIDs to
+            // every server and invalidate any `last_server_id`
+            // reference that auto-connect and the tray's Connect
+            // button rely on.
+            let existing_for_sub: std::collections::HashMap<(String, u16, String), String> =
+                servers
+                    .iter()
+                    .filter(|s| s.subscription_id.as_deref() == Some(id_for_blocking.as_str()))
+                    .map(|s| ((s.address.clone(), s.port, s.uuid.clone()), s.id.clone()))
+                    .collect();
+
+            let new_servers: Vec<ServerConfig> = parsed
+                .into_iter()
+                .map(|mut s| {
+                    let key = (s.address.clone(), s.port, s.uuid.clone());
+                    s.id = existing_for_sub
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                    s.subscription_id = Some(id_for_blocking.clone());
+                    s
+                })
+                .collect();
+
+            // Replace every server tagged with this subscription id
+            // with the freshly-imported set. Manually-added servers
+            // (subscription_id == None) and servers from other
+            // subscriptions are left alone.
+            servers.retain(|s| s.subscription_id.as_deref() != Some(id_for_blocking.as_str()));
+            let new_count = new_servers.len() as u32;
+            servers.extend(new_servers.clone());
+            storage::save_servers(&app_for_blocking, &servers).map_err(|e| e.to_string())?;
+
+            let mut subs =
+                storage::load_subscriptions(&app_for_blocking).map_err(|e| e.to_string())?;
+            let pos = subs
+                .iter()
+                .position(|s| s.id == id_for_blocking)
+                .ok_or_else(|| format!("Subscription with id {id_for_blocking} not found"))?;
+            subs[pos].last_updated_at = Some(now_unix_seconds());
+            subs[pos].last_server_count = Some(new_count);
+            let updated = subs[pos].clone();
+            storage::save_subscriptions(&app_for_blocking, &subs).map_err(|e| e.to_string())?;
+            Ok((updated, new_servers))
+        },
+    )
     .await
     .map_err(|e| format!("storage task panicked: {e}"))??;
 

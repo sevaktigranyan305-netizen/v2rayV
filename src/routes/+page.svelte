@@ -196,6 +196,25 @@
 	// the modal against whatever server was last selected.
 	let unlistenSudoAuthFailed: UnlistenFn | null = null;
 
+	// Subscription to the cross-platform `connection-status-changed`
+	// event. Without this listener, clicking Connect/Disconnect in the
+	// tray menu changes the backend state but never refreshes the
+	// frontend — the poll loop stops once the previous status settled
+	// to disconnected/error, so the window UI stays out of sync until
+	// the user manually clicks the in-window toggle. Refreshing here
+	// catches up immediately, and restarting the poll loop keeps stats
+	// flowing if we landed in a "connected"/"connecting" state.
+	let unlistenStatusChanged: UnlistenFn | null = null;
+
+	// Tray Connect button — the backend asks us to perform a connect
+	// because the frontend is the only place that knows the currently
+	// selected server (which may differ from the persisted
+	// `last_server_id`, especially right after a subscription refresh)
+	// and the only place that owns the macOS sudo-password modal
+	// flow. We reuse the in-window connect path verbatim so behaviour
+	// is identical.
+	let unlistenTrayConnect: UnlistenFn | null = null;
+
 	onMount(async () => {
 		try {
 			await servers.load();
@@ -233,12 +252,35 @@
 			// is fine — just log so we'd notice if the call itself broke.
 			console.warn('sudo-auth-failed listener registration failed:', e);
 		}
+
+		try {
+			unlistenStatusChanged = await listen('connection-status-changed', async () => {
+				// Payload is just the new status string; we always read
+				// the authoritative info via getConnectionInfo so the
+				// server name / connected_since / error_message fields
+				// land in one go.
+				await store.refresh();
+				store.startPolling();
+			});
+		} catch (e) {
+			console.warn('connection-status-changed listener registration failed:', e);
+		}
+
+		try {
+			unlistenTrayConnect = await listen('tray-connect-requested', async () => {
+				await handleToggle();
+			});
+		} catch (e) {
+			console.warn('tray-connect-requested listener registration failed:', e);
+		}
 	});
 
 	onDestroy(() => {
 		store.stopPolling();
 		if (toastTimer !== null) clearTimeout(toastTimer);
 		unlistenSudoAuthFailed?.();
+		unlistenStatusChanged?.();
+		unlistenTrayConnect?.();
 	});
 </script>
 
