@@ -1,10 +1,9 @@
-use log::warn;
+use log::{info, warn};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Listener, Manager, Runtime};
 
 use crate::models::ConnectionStatus;
-use crate::storage;
 use crate::xray::XrayManager;
 
 pub fn setup_tray<R: Runtime>(app: &AppHandle<R>) -> Result<(), Box<dyn std::error::Error>> {
@@ -103,9 +102,21 @@ fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+/// Tray Connect/Disconnect button handler. For Disconnect we can
+/// drive the manager directly because `XrayManager::stop()` is
+/// platform-uniform and idempotent. For Connect we delegate to the
+/// frontend by emitting `tray-connect-requested` and showing the
+/// window: the frontend already knows which server the user has
+/// selected (which may differ from the persisted `last_server_id`,
+/// especially after a subscription refresh that hands out fresh
+/// internal IDs), and it owns the macOS sudo-password modal flow.
+/// Going through the frontend keeps the Connect button consistent
+/// with the in-window button instead of silently falling through to
+/// "show window" when the persisted state is stale.
 fn handle_toggle_connection<R: Runtime>(app: &AppHandle<R>) {
     let manager = app.state::<XrayManager>();
     let info = manager.status();
+    info!("Tray toggle clicked; current status: {:?}", info.status);
 
     match info.status {
         ConnectionStatus::Connected | ConnectionStatus::Connecting => {
@@ -114,34 +125,18 @@ fn handle_toggle_connection<R: Runtime>(app: &AppHandle<R>) {
             // its poll loop. The xray watcher / wait thread will emit
             // the final "disconnected" event once xray actually exits.
             let _ = app.emit("connection-status-changed", "disconnecting");
-            let _ = manager.stop();
+            if let Err(e) = manager.stop() {
+                warn!("Tray disconnect failed: {e}");
+                let _ = app.emit("connection-status-changed", "connected");
+            }
         }
         ConnectionStatus::Disconnected | ConnectionStatus::Error => {
-            // Try to connect with last server
-            let settings = storage::load_settings(app).unwrap_or_default();
-            if let Some(ref server_id) = settings.last_server_id {
-                if let Ok(servers) = storage::load_servers(app) {
-                    if let Some(server) = servers.iter().find(|s| s.id == *server_id) {
-                        // Same pattern as above: emit a connecting
-                        // event so the UI flips to "Connecting…" right
-                        // away. start() updates internal state to
-                        // Connecting synchronously but has no AppHandle
-                        // of its own, so we do the emit here.
-                        let _ = app.emit("connection-status-changed", "connecting");
-                        if let Err(e) = manager.start(app, server, &settings.bypass_domains) {
-                            warn!("Tray connect failed: {e}");
-                            // start() already reset internal state to
-                            // Error, but the frontend may still be
-                            // showing "Connecting…" from our emit
-                            // above — nudge it back.
-                            let _ = app.emit("connection-status-changed", "disconnected");
-                        }
-                        return;
-                    }
-                }
-            }
-            // No last server — show the window instead
+            // Surface the window first so the user can see what is
+            // happening (and so the sudo-password modal has a parent
+            // window on macOS), then ask the frontend to start the
+            // connect with whichever server is currently selected.
             show_main_window(app);
+            let _ = app.emit("tray-connect-requested", ());
         }
         ConnectionStatus::Disconnecting => {
             // Do nothing while transitioning

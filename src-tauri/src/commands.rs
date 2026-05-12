@@ -364,10 +364,30 @@ pub async fn refresh_subscription<R: Runtime>(
         return Err("No vless:// servers found in subscription".to_string());
     }
 
+    // Preserve internal IDs across refresh: a server in the freshly-
+    // fetched batch that matches an existing server on
+    // (address, port, vless-uuid) is the same server from the user's
+    // point of view (name may have been edited in the panel), so we
+    // reuse the old internal ID. Without this every refresh would
+    // hand out brand-new UUIDs to every server and invalidate any
+    // `last_server_id` reference that auto-connect and the tray's
+    // Connect button rely on.
+    let existing_servers = storage::load_servers(&app).map_err(|e| e.to_string())?;
+    let existing_for_sub: std::collections::HashMap<(String, u16, String), String> =
+        existing_servers
+            .iter()
+            .filter(|s| s.subscription_id.as_deref() == Some(id.as_str()))
+            .map(|s| ((s.address.clone(), s.port, s.uuid.clone()), s.id.clone()))
+            .collect();
+
     let new_servers: Vec<ServerConfig> = parsed
         .into_iter()
         .map(|mut s| {
-            s.id = uuid::Uuid::new_v4().to_string();
+            let key = (s.address.clone(), s.port, s.uuid.clone());
+            s.id = existing_for_sub
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             s.subscription_id = Some(id.clone());
             s
         })

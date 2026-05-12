@@ -206,6 +206,15 @@
 	// flowing if we landed in a "connected"/"connecting" state.
 	let unlistenStatusChanged: UnlistenFn | null = null;
 
+	// Tray Connect button — the backend asks us to perform a connect
+	// because the frontend is the only place that knows the currently
+	// selected server (which may differ from the persisted
+	// `last_server_id`, especially right after a subscription refresh)
+	// and the only place that owns the macOS sudo-password modal
+	// flow. We reuse the in-window connect path verbatim so behaviour
+	// is identical.
+	let unlistenTrayConnect: UnlistenFn | null = null;
+
 	onMount(async () => {
 		try {
 			await servers.load();
@@ -256,6 +265,14 @@
 		} catch (e) {
 			console.warn('connection-status-changed listener registration failed:', e);
 		}
+
+		try {
+			unlistenTrayConnect = await listen('tray-connect-requested', async () => {
+				await handleToggle();
+			});
+		} catch (e) {
+			console.warn('tray-connect-requested listener registration failed:', e);
+		}
 	});
 
 	onDestroy(() => {
@@ -263,6 +280,7 @@
 		if (toastTimer !== null) clearTimeout(toastTimer);
 		unlistenSudoAuthFailed?.();
 		unlistenStatusChanged?.();
+		unlistenTrayConnect?.();
 	});
 </script>
 
