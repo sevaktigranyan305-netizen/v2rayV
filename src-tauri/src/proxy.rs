@@ -1,5 +1,9 @@
+#[cfg(not(target_os = "macos"))]
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
+use log::info;
+#[cfg(not(target_os = "macos"))]
 use log::{error, info};
 
 const SOCKS_HOST: &str = "127.0.0.1";
@@ -7,6 +11,13 @@ const HTTP_HOST: &str = "127.0.0.1";
 const HTTP_PORT: u16 = 10809;
 
 /// Enable system-wide proxy pointing to the local xray SOCKS5/HTTP proxy.
+///
+/// macOS is intentionally not handled here: the macOS build of v2rayV is
+/// L3-only (xray-core's `l3client` owns a utun device) and never starts a
+/// SOCKS inbound, so there is nothing to point the OS proxy at. The
+/// `enable_macos` / `disable_macos` / `reset_stale_macos` helpers that
+/// used to drive `networksetup` were removed when we dropped the legacy
+/// SOCKS-on-macOS code path inherited from upstream RustVPN.
 pub fn enable_system_proxy(socks_port: u16, bypass_domains: &[String], bypass_subnets: &[String]) {
     info!(
         "Enabling system proxy (SOCKS5: {}:{}, HTTP: {}:{})",
@@ -20,10 +31,13 @@ pub fn enable_system_proxy(socks_port: u16, bypass_domains: &[String], bypass_su
     enable_windows(bypass_domains, bypass_subnets);
 
     #[cfg(target_os = "macos")]
-    enable_macos(socks_port, bypass_domains, bypass_subnets);
+    {
+        let _ = (socks_port, bypass_domains, bypass_subnets);
+    }
 }
 
-/// Disable system-wide proxy.
+/// Disable system-wide proxy. macOS is a no-op for the same reason as
+/// `enable_system_proxy`.
 pub fn disable_system_proxy() {
     info!("Disabling system proxy");
 
@@ -32,23 +46,18 @@ pub fn disable_system_proxy() {
 
     #[cfg(target_os = "windows")]
     disable_windows();
-
-    #[cfg(target_os = "macos")]
-    disable_macos();
 }
 
 /// Reset any system proxy state left behind by a previous session that pointed
 /// to our local ports. Called at app startup before auto-connect; no-op if the
-/// user has their own proxy configured.
+/// user has their own proxy configured. macOS is a no-op because we never
+/// touch `networksetup` on macOS.
 pub fn reset_stale_system_proxy() {
     #[cfg(target_os = "linux")]
     reset_stale_linux();
 
     #[cfg(target_os = "windows")]
     reset_stale_windows();
-
-    #[cfg(target_os = "macos")]
-    reset_stale_macos();
 }
 
 // ---------------------------------------------------------------------------
@@ -367,185 +376,15 @@ public class WinINet {
 }
 
 // ---------------------------------------------------------------------------
-// macOS (networksetup)
+// macOS
 // ---------------------------------------------------------------------------
-
-#[cfg(target_os = "macos")]
-fn enable_macos(socks_port: u16, bypass_domains: &[String], bypass_subnets: &[String]) {
-    // Get active network service (usually "Wi-Fi" or "Ethernet")
-    let service = match get_macos_network_service() {
-        Some(s) => s,
-        None => {
-            error!("Could not detect active macOS network service");
-            return;
-        }
-    };
-
-    // Set HTTP proxy
-    networksetup(&["-setwebproxy", &service, HTTP_HOST, &HTTP_PORT.to_string()]);
-    networksetup(&["-setwebproxystate", &service, "on"]);
-
-    // Set HTTPS proxy
-    networksetup(&[
-        "-setsecurewebproxy",
-        &service,
-        HTTP_HOST,
-        &HTTP_PORT.to_string(),
-    ]);
-    networksetup(&["-setsecurewebproxystate", &service, "on"]);
-
-    // Set SOCKS proxy
-    networksetup(&[
-        "-setsocksfirewallproxy",
-        &service,
-        SOCKS_HOST,
-        &socks_port.to_string(),
-    ]);
-    networksetup(&["-setsocksfirewallproxystate", &service, "on"]);
-
-    // Set bypass domains
-    let mut bypass = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "10.0.0.0/8".to_string(),
-        "172.16.0.0/12".to_string(),
-        "192.168.0.0/16".to_string(),
-        "::1".to_string(),
-    ];
-    for domain in bypass_domains {
-        let d = domain.trim();
-        if !d.is_empty() {
-            bypass.push(d.to_string());
-            bypass.push(format!("*.{d}"));
-        }
-    }
-    for subnet in bypass_subnets {
-        let s = subnet.trim();
-        if !s.is_empty() {
-            bypass.push(s.to_string());
-        }
-    }
-    let mut args = vec!["-setproxybypassdomains".to_string(), service.clone()];
-    args.extend(bypass);
-    let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    networksetup(&args_refs);
-
-    info!(
-        "System proxy enabled via networksetup (service: {})",
-        service
-    );
-}
-
-#[cfg(target_os = "macos")]
-fn disable_macos() {
-    let service = match get_macos_network_service() {
-        Some(s) => s,
-        None => {
-            error!("Could not detect active macOS network service");
-            return;
-        }
-    };
-
-    networksetup(&["-setwebproxystate", &service, "off"]);
-    networksetup(&["-setsecurewebproxystate", &service, "off"]);
-    networksetup(&["-setsocksfirewallproxystate", &service, "off"]);
-
-    info!(
-        "System proxy disabled via networksetup (service: {})",
-        service
-    );
-}
-
-#[cfg(target_os = "macos")]
-pub fn reset_stale_macos() {
-    let Some(service) = get_macos_network_service() else {
-        return;
-    };
-    // If the active SOCKS proxy points at our local port, reset everything.
-    if networksetup_proxy_points_at_us(&service, "-getsocksfirewallproxy") {
-        networksetup(&["-setwebproxystate", &service, "off"]);
-        networksetup(&["-setsecurewebproxystate", &service, "off"]);
-        networksetup(&["-setsocksfirewallproxystate", &service, "off"]);
-        info!("Reset stale macOS proxy left over from prior session (service: {service})");
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn networksetup_proxy_points_at_us(service: &str, getter: &str) -> bool {
-    let Ok(output) = Command::new("networksetup")
-        .args([getter, service])
-        .output()
-    else {
-        return false;
-    };
-    if !output.status.success() {
-        return false;
-    }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut enabled = false;
-    let mut local = false;
-    for line in text.lines() {
-        if let Some(v) = line.strip_prefix("Enabled: ") {
-            enabled = v.trim() == "Yes";
-        } else if let Some(v) = line.strip_prefix("Server: ") {
-            let v = v.trim();
-            if v == SOCKS_HOST || v == HTTP_HOST || v == "localhost" {
-                local = true;
-            }
-        }
-    }
-    enabled && local
-}
-
-#[cfg(target_os = "macos")]
-fn get_macos_network_service() -> Option<String> {
-    // Get the default route interface, then map it to a network service name
-    let route_output = Command::new("route")
-        .args(["-n", "get", "default"])
-        .output()
-        .ok()?;
-    let route_str = String::from_utf8_lossy(&route_output.stdout);
-    let iface = route_str
-        .lines()
-        .find(|l| l.contains("interface:"))?
-        .split(':')
-        .nth(1)?
-        .trim()
-        .to_string();
-
-    // Map interface to service name
-    let services_output = Command::new("networksetup")
-        .args(["-listallhardwareports"])
-        .output()
-        .ok()?;
-    let services_str = String::from_utf8_lossy(&services_output.stdout);
-
-    let mut current_service = String::new();
-    for line in services_str.lines() {
-        if let Some(name) = line.strip_prefix("Hardware Port: ") {
-            current_service = name.to_string();
-        } else if let Some(device) = line.strip_prefix("Device: ") {
-            if device.trim() == iface {
-                return Some(current_service);
-            }
-        }
-    }
-
-    // Fallback: try "Wi-Fi"
-    Some("Wi-Fi".to_string())
-}
-
-#[cfg(target_os = "macos")]
-fn networksetup(args: &[&str]) {
-    let result = Command::new("networksetup").args(args).output();
-    match result {
-        Ok(output) if output.status.success() => {}
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("networksetup {:?} failed: {stderr}", args);
-        }
-        Err(e) => {
-            error!("Failed to run networksetup: {e}");
-        }
-    }
-}
+//
+// Intentionally empty. The macOS build of v2rayV runs in L3 mode only —
+// xray-core's `l3client` owns a utun device and the OS-level proxy
+// (networksetup web/secure/socks) is left untouched. The
+// `enable_macos` / `disable_macos` / `reset_stale_macos` /
+// `networksetup_proxy_points_at_us` / `get_macos_network_service` /
+// `networksetup` helpers that used to live here have been removed
+// because nothing calls them anymore and clippy would (correctly) flag
+// them as dead code. If we ever need a SOCKS-on-macOS fallback again,
+// recover them from the git history of this file.

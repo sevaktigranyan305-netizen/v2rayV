@@ -2,6 +2,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Runtime, State};
 
+#[cfg(target_os = "macos")]
+use crate::config;
+#[cfg(target_os = "macos")]
+use crate::macos_helper;
 use crate::models::{
     AppSettings, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
     Subscription,
@@ -18,13 +22,50 @@ fn now_unix_seconds() -> u64 {
         .unwrap_or(0)
 }
 
+/// Outcome of a `connect` call. We need a richer return type than
+/// `()` because on macOS we may have to bounce back to the UI to ask
+/// the user for their sudo password before we can actually launch
+/// xray under root. The `kind` discriminator is what the frontend
+/// switches on.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind")]
+pub enum ConnectOutcome {
+    /// xray-core was spawned (possibly via sudo on macOS) and is now
+    /// transitioning through Connecting → Connected. The frontend's
+    /// poll loop will pick up the actual status.
+    Ok,
+    /// macOS only: there is no sudo password in Keychain (first connect
+    /// since install, or the saved entry was just deleted because it
+    /// no longer authenticated). The frontend should show its
+    /// SudoPasswordModal and call `macos_store_sudo_password` before
+    /// invoking `connect` again.
+    NeedsSudoPassword,
+}
+
 #[tauri::command]
 pub fn connect<R: Runtime>(
     app: AppHandle<R>,
     manager: State<'_, XrayManager>,
     server_config: ServerConfig,
-) -> Result<(), String> {
+) -> Result<ConnectOutcome, String> {
     server_config.validate()?;
+
+    // macOS supports L3 only. Refuse non-L3 servers up front so the
+    // user gets a clear error instead of a cryptic xray spawn failure.
+    // If the server *is* L3, make sure we have a sudo password stashed
+    // in Keychain — if not, surface NeedsSudoPassword to the UI.
+    #[cfg(target_os = "macos")]
+    {
+        if config::virtualnet_enabled(&server_config).is_none() {
+            return Err("macOS build of v2rayV supports L3 (vnet=1) servers only. \
+                 The selected server is missing vnet=1/vnetIp= parameters."
+                .to_string());
+        }
+        if !macos_helper::has_password() {
+            return Ok(ConnectOutcome::NeedsSudoPassword);
+        }
+    }
+
     let settings = storage::load_settings(&app).unwrap_or_default();
     manager
         .start(&app, &server_config, &settings.bypass_domains)
@@ -35,7 +76,65 @@ pub fn connect<R: Runtime>(
     settings.last_server_id = Some(server_config.id.clone());
     let _ = storage::save_settings(&app, &settings);
 
-    Ok(())
+    Ok(ConnectOutcome::Ok)
+}
+
+/// True if a macOS sudo password is currently cached in Keychain.
+/// Other platforms return false unconditionally so the frontend
+/// can call this without cfg gymnastics.
+#[tauri::command]
+pub fn macos_has_sudo_password() -> Result<bool, String> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(macos_helper::has_password())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(false)
+    }
+}
+
+/// Validate a candidate macOS sudo password and, if valid, save it to
+/// Keychain so subsequent connects can re-use it. Returns Ok(()) on
+/// success and Err with a human-readable message on failure (wrong
+/// password, sudo missing, Keychain write rejected).
+///
+/// On non-macOS platforms this is a no-op error so the IPC surface
+/// stays uniform but the frontend never accidentally believes it
+/// succeeded.
+#[tauri::command]
+pub fn macos_store_sudo_password(password: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        if password.is_empty() {
+            return Err("Password must not be empty".to_string());
+        }
+        let ok = macos_helper::validate_password(&password).map_err(|e| e.to_string())?;
+        if !ok {
+            return Err("Incorrect macOS password".to_string());
+        }
+        macos_helper::write_password(&password).map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = password;
+        Err("macos_store_sudo_password is only available on macOS".to_string())
+    }
+}
+
+/// Remove the cached macOS sudo password from Keychain. The UI calls
+/// this when sudo rejects the saved password (e.g. the user changed
+/// their macOS account password) so the next connect re-prompts.
+#[tauri::command]
+pub fn macos_clear_sudo_password() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        macos_helper::delete_password().map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
 }
 
 #[tauri::command]

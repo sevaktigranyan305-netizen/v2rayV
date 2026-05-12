@@ -9,6 +9,10 @@ use tauri_plugin_shell::ShellExt;
 
 use crate::config;
 use crate::config::generate_client_config;
+#[cfg(target_os = "macos")]
+use crate::macos_helper;
+#[cfg(target_os = "macos")]
+use crate::macos_xray;
 use crate::models::{
     AppError, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
 };
@@ -22,6 +26,11 @@ const MAX_LOG_ENTRIES: usize = 1000;
 
 pub struct XrayManager {
     child: Arc<Mutex<Option<CommandChild>>>,
+    /// macOS-only sudo+xray handle. Lives next to `child` (which stays
+    /// None on macOS) so the rest of XrayManager doesn't need to know
+    /// which spawn path produced the running process.
+    #[cfg(target_os = "macos")]
+    macos_child: Arc<Mutex<Option<macos_xray::SudoChild>>>,
     state: Arc<Mutex<ConnectionInfo>>,
     config_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     stats: Arc<Mutex<SpeedStats>>,
@@ -47,6 +56,8 @@ impl XrayManager {
     pub fn new() -> Self {
         Self {
             child: Arc::new(Mutex::new(None)),
+            #[cfg(target_os = "macos")]
+            macos_child: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(ConnectionInfo::default())),
             config_path: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(SpeedStats::default())),
@@ -101,11 +112,23 @@ impl XrayManager {
         // Update status to connecting
         self.update_status(ConnectionStatus::Connecting, Some(server), None);
 
-        self.start_desktop(app, server, bypass_domains)?;
+        if let Err(e) = self.start_desktop(app, server, bypass_domains) {
+            self.update_status(ConnectionStatus::Error, None, Some(e.to_string()));
+            return Err(e);
+        }
 
         Ok(())
     }
 
+    // The allow attributes here apply only on macOS: when
+    // target_os = "macos" the function returns inside the cfg block
+    // below and clippy/rustc would otherwise flag the Tauri-sidecar
+    // path as unreachable / its locals as unused. The sidecar path is
+    // still type-checked on every target, which is what we want.
+    #[cfg_attr(
+        target_os = "macos",
+        allow(unreachable_code, unused_variables, unused_mut, unused_assignments)
+    )]
     fn start_desktop<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -118,6 +141,17 @@ impl XrayManager {
             if let Some(child) = guard.take() {
                 let _ = child.kill();
                 info!("Killed stale xray process");
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut guard = self.macos_child.lock().unwrap();
+            if let Some(sc) = guard.take() {
+                if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                    warn!("Failed to kill stale sudo+xray process group: {e}");
+                } else {
+                    info!("Killed stale sudo+xray process group");
+                }
             }
         }
 
@@ -209,6 +243,19 @@ impl XrayManager {
         {
             let mut path = self.config_path.lock().unwrap();
             *path = Some(config_file.clone());
+        }
+
+        // On macOS we have to launch xray under `sudo -S` so it can
+        // open a utun device for L3 mode. The cross-platform
+        // Tauri-sidecar spawn that follows inherits the GUI user's
+        // privileges and would fail with EPERM on utun creation, so we
+        // short-circuit here and let `start_desktop_macos` run xray via
+        // std::process::Command instead. The macOS path is also the
+        // only one that uses the Keychain-cached sudo password.
+        #[cfg(target_os = "macos")]
+        {
+            self.start_desktop_macos(app, server, &config_file)?;
+            return Ok(());
         }
 
         // Create sidecar command
@@ -694,6 +741,139 @@ impl XrayManager {
         Ok(())
     }
 
+    /// macOS L3-only spawn path. Reads the user's sudo password from
+    /// Keychain (which the UI is responsible for filling before the
+    /// first connect), runs xray under `sudo -S` so it can claim a
+    /// utun device, and installs the same Connecting → Connected /
+    /// Connecting → Error / 15 s timeout / 6 s fallback watchdogs that
+    /// the cross-platform sidecar path uses on Windows and Linux. The
+    /// Tauri sidecar API is not used here because it spawns xray as
+    /// the GUI user, which would fail when xray tries to open utun.
+    #[cfg(target_os = "macos")]
+    fn start_desktop_macos<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        server: &ServerConfig,
+        config_file: &std::path::Path,
+    ) -> Result<(), AppError> {
+        if !self.l3_mode.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(AppError::XrayProcess(
+                "macOS only supports L3 (vnet=1) servers. The selected server is missing \
+                 vnet=1/vnetIp= parameters."
+                    .to_string(),
+            ));
+        }
+
+        let password = macos_helper::read_password().ok_or_else(|| {
+            AppError::XrayProcess(
+                "No macOS sudo password saved. Please enter your password when prompted \
+                 and try again."
+                    .to_string(),
+            )
+        })?;
+
+        let xray_bin = macos_xray::locate_xray_binary()?;
+        info!("macOS xray binary: {}", xray_bin.display());
+
+        let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let output_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let sudo_child = macos_xray::spawn_xray_sudo(
+            app,
+            &xray_bin,
+            config_file,
+            &password,
+            self.state.clone(),
+            self.logs.clone(),
+            server.name.clone(),
+            server.address.clone(),
+            started_flag.clone(),
+            output_seen.clone(),
+            line_signals_started,
+            mark_connected,
+            push_log_entry,
+        )?;
+
+        {
+            let mut guard = self.macos_child.lock().unwrap();
+            *guard = Some(sudo_child);
+        }
+
+        // 15 s connection timeout: kill sudo+xray if we haven't seen
+        // the "started" marker by then. Mirrors the cross-platform
+        // timeout in start_desktop.
+        {
+            let timeout_state = self.state.clone();
+            let timeout_macos_child = self.macos_child.clone();
+            let timeout_logs = self.logs.clone();
+            let timeout_app = app.clone();
+            let started = started_flag.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                if started.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                let mut s = timeout_state.lock().unwrap();
+                if s.status == ConnectionStatus::Connecting {
+                    warn!("Connection timeout after 15 seconds (macOS)");
+                    push_log_entry(
+                        &timeout_logs,
+                        "error",
+                        "Connection timeout after 15 seconds",
+                    );
+                    s.status = ConnectionStatus::Error;
+                    s.error_message = Some(
+                        "Connection timeout — server unreachable or config invalid".to_string(),
+                    );
+                    s.connected_since = None;
+                    drop(s);
+                    let sc = { timeout_macos_child.lock().unwrap().take() };
+                    if let Some(sc) = sc {
+                        if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                            warn!("Timeout watchdog: failed to kill sudo+xray: {e}");
+                        }
+                    }
+                    let _ = timeout_app.emit("connection-status-changed", "disconnected");
+                }
+            });
+        }
+
+        // 6 s fallback: xray-core sometimes reorders output across
+        // pipes and we don't see the "started" magic word in time. If
+        // we've at least seen *some* output, promote Connecting →
+        // Connected so the UI isn't stuck. The 15 s timeout above
+        // still trips if there's NO output at all.
+        {
+            let fb_state = self.state.clone();
+            let fb_app = app.clone();
+            let fb_server_name = server.name.clone();
+            let fb_server_address = server.address.clone();
+            let fb_started = started_flag.clone();
+            let fb_output_seen = output_seen.clone();
+            let fb_logs = self.logs.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(6));
+                if fb_started.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                if !fb_output_seen.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                if mark_connected(&fb_started, &fb_state, &fb_server_name, &fb_server_address) {
+                    warn!("xray fallback connection trigger: 'started' log not observed (macOS)");
+                    push_log_entry(
+                        &fb_logs,
+                        "info",
+                        "Marking Connected via fallback (no 'started' log observed)",
+                    );
+                    let _ = fb_app.emit("connection-status-changed", "connected");
+                }
+            });
+        }
+
+        Ok(())
+    }
+
     pub fn stop(&self) -> Result<(), AppError> {
         self.update_status(ConnectionStatus::Disconnecting, None, None);
 
@@ -767,6 +947,21 @@ impl XrayManager {
                 .kill()
                 .map_err(|e| AppError::XrayProcess(format!("Failed to kill xray: {e}")))?;
             info!("Hard-killed xray process (pid={pid})");
+        }
+
+        // macOS uses a separate sudo+xray child (see start_desktop_macos).
+        // The wait thread spawned in spawn_xray_sudo will see the kill
+        // and drive the Connecting → Disconnected transition + emit
+        // the connection-status-changed event on its own.
+        #[cfg(target_os = "macos")]
+        {
+            let sc = { self.macos_child.lock().unwrap().take() };
+            if let Some(sc) = sc {
+                // Propagate so the UI can show a real error instead of
+                // silently transitioning to Disconnected while xray is
+                // still alive in the background.
+                macos_xray::stop_sudo_child(&sc)?;
+            }
         }
         let t3 = std::time::Instant::now();
 

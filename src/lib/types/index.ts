@@ -86,3 +86,18 @@ export type PlatformType = 'windows' | 'macos' | 'linux';
 export interface PlatformInfo {
 	platform: PlatformType;
 }
+
+/**
+ * Tagged-union return type of the backend `connect` command.
+ *
+ * - `Ok` — xray-core was spawned; the connection-info poll loop will
+ *   pick up the actual status (Connecting → Connected, or Error if the
+ *   server is unreachable).
+ * - `NeedsSudoPassword` — macOS only. The backend cannot spawn xray
+ *   under sudo because the user's password is not in Keychain yet.
+ *   The UI must show its sudo-password modal, call
+ *   `macosStoreSudoPassword`, then retry `connect`.
+ */
+export type ConnectOutcome =
+	| { kind: 'Ok' }
+	| { kind: 'NeedsSudoPassword' };

@@ -1,6 +1,15 @@
 import { getConnectionInfo, connect, disconnect, getSpeedStats } from '$lib/api/tauri';
 import type { ConnectionInfo, ServerConfig, SpeedStats } from '$lib/types';
 
+/**
+ * Outcome of `connectVpn`. The store maps the backend's
+ * `ConnectOutcome.NeedsSudoPassword` into `needs-sudo-password` so the
+ * caller can show the modal without knowing about the IPC shape.
+ * Errors are surfaced via `info.status === 'error'` and `error_message`
+ * as before; this discriminator is just for the password-prompt flow.
+ */
+export type ConnectAttempt = 'ok' | 'needs-sudo-password';
+
 const DEFAULT_INFO: ConnectionInfo = {
 	status: 'disconnected',
 	server_name: null,
@@ -73,24 +82,33 @@ function createConnectionStore() {
 		}
 	}
 
-	async function connectVpn(config: ServerConfig) {
+	async function connectVpn(config: ServerConfig): Promise<ConnectAttempt> {
 		// Guard against double-click while a transition is in flight. Use the
 		// observed status (driven by the poll loop) rather than the in-flight
 		// `isLoading` flag, so a stale lingering `isLoading=true` after the
 		// backend has already settled doesn't lock the UI.
-		if (info.status === 'connecting' || info.status === 'disconnecting') return;
+		if (info.status === 'connecting' || info.status === 'disconnecting') return 'ok';
 		isLoading = true;
 		info = { ...info, status: 'connecting', error_message: null };
 		try {
-			await connect(config);
+			const outcome = await connect(config);
+			// macOS-only branch: the backend has no cached sudo password.
+			// Bounce back to 'disconnected' so the UI can show the modal
+			// without the connect button being stuck in "Connecting…".
+			if (outcome.kind === 'NeedsSudoPassword') {
+				info = { ...info, status: 'disconnected', error_message: null };
+				return 'needs-sudo-password';
+			}
 			await refresh();
 			startPolling();
+			return 'ok';
 		} catch (err) {
 			info = {
 				...info,
 				status: 'error',
 				error_message: err instanceof Error ? err.message : String(err)
 			};
+			return 'ok';
 		} finally {
 			isLoading = false;
 		}

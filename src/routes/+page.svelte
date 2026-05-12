@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
+	import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 	import { connectionStore } from '$lib/stores/connection.svelte';
 	import { serversStore } from '$lib/stores/servers.svelte';
 	import { settingsStore } from '$lib/stores/settings.svelte';
@@ -10,6 +11,7 @@
 	import ServerForm from '$lib/components/ServerForm.svelte';
 	import ImportExportBar from '$lib/components/ImportExportBar.svelte';
 	import SubscriptionList from '$lib/components/SubscriptionList.svelte';
+	import SudoPasswordModal from '$lib/components/SudoPasswordModal.svelte';
 	import ThemeToggle from '$lib/components/ThemeToggle.svelte';
 	import type { ServerConfig } from '$lib/types';
 
@@ -21,6 +23,13 @@
 	// Form modal state
 	let showForm = $state(false);
 	let editingServer = $state<ServerConfig | null>(null);
+
+	// macOS-only: sudo password prompt state. `pendingServer` is the
+	// server we tried to connect to right before the backend asked for
+	// the password — we re-run `connectVpn` against it once the modal
+	// reports success.
+	let showSudoModal = $state(false);
+	let pendingServer = $state<ServerConfig | null>(null);
 
 	// Toast state
 	let toast = $state<{ message: string; type: 'success' | 'error' } | null>(null);
@@ -53,7 +62,32 @@
 			return;
 		}
 
-		await store.connectVpn(selected);
+		const outcome = await store.connectVpn(selected);
+		if (outcome === 'needs-sudo-password') {
+			pendingServer = selected;
+			showSudoModal = true;
+		}
+	}
+
+	async function handleSudoPasswordSaved() {
+		showSudoModal = false;
+		const server = pendingServer;
+		pendingServer = null;
+		if (!server) return;
+		// On the off chance the freshly-saved password got wiped between
+		// write_password and has_password() (e.g. a concurrent
+		// sudo-auth-failed event), surface the modal again instead of
+		// silently swallowing the NeedsSudoPassword outcome.
+		const outcome = await store.connectVpn(server);
+		if (outcome === 'needs-sudo-password') {
+			pendingServer = server;
+			showSudoModal = true;
+		}
+	}
+
+	function handleSudoPasswordCancelled() {
+		showSudoModal = false;
+		pendingServer = null;
 	}
 
 	function openEdit(server: ServerConfig) {
@@ -154,6 +188,14 @@
 		}
 	}
 
+	// Subscription to the backend's `sudo-auth-failed` event so the
+	// stale-password disconnect path immediately re-prompts instead of
+	// leaving the user with a cryptic "xray exited" error and forcing
+	// them to click Connect again. The backend already wipes the
+	// Keychain entry before emitting, so all we have to do here is open
+	// the modal against whatever server was last selected.
+	let unlistenSudoAuthFailed: UnlistenFn | null = null;
+
 	onMount(async () => {
 		try {
 			await servers.load();
@@ -174,11 +216,29 @@
 		}
 		store.refresh();
 		store.startPolling();
+
+		try {
+			unlistenSudoAuthFailed = await listen('sudo-auth-failed', () => {
+				const selected = servers.selectedServer;
+				if (!selected) return;
+				pendingServer = selected;
+				showSudoModal = true;
+				showToast(
+					'Saved macOS password is no longer valid — please re-enter it.',
+					'error'
+				);
+			});
+		} catch (e) {
+			// Non-macOS builds don't emit this event, so a missing listener
+			// is fine — just log so we'd notice if the call itself broke.
+			console.warn('sudo-auth-failed listener registration failed:', e);
+		}
 	});
 
 	onDestroy(() => {
 		store.stopPolling();
 		if (toastTimer !== null) clearTimeout(toastTimer);
+		unlistenSudoAuthFailed?.();
 	});
 </script>
 
@@ -265,6 +325,14 @@
 		server={editingServer}
 		onSave={handleSave}
 		onCancel={closeForm}
+	/>
+{/if}
+
+<!-- macOS sudo password prompt -->
+{#if showSudoModal}
+	<SudoPasswordModal
+		onSuccess={handleSudoPasswordSaved}
+		onCancel={handleSudoPasswordCancelled}
 	/>
 {/if}
 
