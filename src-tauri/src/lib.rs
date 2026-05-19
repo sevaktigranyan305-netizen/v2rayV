@@ -137,10 +137,41 @@ pub fn run() {
                 if let Some(ref server_id) = settings.last_server_id {
                     if let Ok(servers) = storage::load_servers(&handle) {
                         if let Some(server) = servers.iter().find(|s| s.id == *server_id) {
-                            let manager = app.state::<XrayManager>();
-                            if let Err(e) = manager.start(&handle, server, &settings.bypass_domains)
-                            {
-                                log::warn!("Auto-connect failed: {e}");
+                            // On macOS / Linux the IPC `connect` enforces
+                            // L3-only and a stored sudo password before
+                            // spawning xray. Auto-connect skips that
+                            // command, so re-apply both gates here so a
+                            // stale `last_server_id` pointing at a
+                            // SOCKS-mode server or a missing credential
+                            // doesn't silently fall through to the Tauri
+                            // sidecar (which would spawn xray as the GUI
+                            // user and fail at TUN-open time).
+                            #[cfg(any(target_os = "macos", target_os = "linux"))]
+                            let can_auto = {
+                                let is_l3 = config::virtualnet_enabled(server).is_some();
+                                let has_pw = secret_store::has_password();
+                                if !is_l3 {
+                                    log::info!(
+                                        "Auto-connect skipped: last server is not L3 (vnet=1)"
+                                    );
+                                }
+                                if is_l3 && !has_pw {
+                                    log::info!(
+                                        "Auto-connect skipped: no sudo password in OS credential store yet"
+                                    );
+                                }
+                                is_l3 && has_pw
+                            };
+                            #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                            let can_auto = true;
+
+                            if can_auto {
+                                let manager = app.state::<XrayManager>();
+                                if let Err(e) =
+                                    manager.start(&handle, server, &settings.bypass_domains)
+                                {
+                                    log::warn!("Auto-connect failed: {e}");
+                                }
                             }
                         }
                     }

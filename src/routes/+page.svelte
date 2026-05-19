@@ -24,9 +24,9 @@
 	let showForm = $state(false);
 	let editingServer = $state<ServerConfig | null>(null);
 
-	// macOS-only: sudo password prompt state. `pendingServer` is the
-	// server we tried to connect to right before the backend asked for
-	// the password — we re-run `connectVpn` against it once the modal
+	// macOS / Linux: sudo password prompt state. `pendingServer` is
+	// the server we tried to connect to right before the backend asked
+	// for the password — we re-run `connectVpn` against it once the modal
 	// reports success.
 	let showSudoModal = $state(false);
 	let pendingServer = $state<ServerConfig | null>(null);
@@ -210,9 +210,9 @@
 	// because the frontend is the only place that knows the currently
 	// selected server (which may differ from the persisted
 	// `last_server_id`, especially right after a subscription refresh)
-	// and the only place that owns the macOS sudo-password modal
-	// flow. We reuse the in-window connect path verbatim so behaviour
-	// is identical.
+	// and the only place that owns the sudo-password modal flow on
+	// macOS / Linux. We reuse the in-window connect path verbatim so
+	// behaviour is identical.
 	let unlistenTrayConnect: UnlistenFn | null = null;
 
 	onMount(async () => {
@@ -243,12 +243,12 @@
 				pendingServer = selected;
 				showSudoModal = true;
 				showToast(
-					'Saved macOS password is no longer valid — please re-enter it.',
+					'Saved sudo password is no longer valid — please re-enter it.',
 					'error'
 				);
 			});
 		} catch (e) {
-			// Non-macOS builds don't emit this event, so a missing listener
+			// Windows builds don't emit this event, so a missing listener
 			// is fine — just log so we'd notice if the call itself broke.
 			console.warn('sudo-auth-failed listener registration failed:', e);
 		}
@@ -370,7 +370,7 @@
 	/>
 {/if}
 
-<!-- macOS sudo password prompt -->
+<!-- Sudo password prompt (macOS / Linux) -->
 {#if showSudoModal}
 	<SudoPasswordModal
 		onSuccess={handleSudoPasswordSaved}
