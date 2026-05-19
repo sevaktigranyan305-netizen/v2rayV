@@ -1,6 +1,6 @@
 [package]
 name = "v2rayv"
-version = "1.0.0"
+version = "1.0.1"
 description = "VLESS+REALITY desktop client"
 authors = ["sevaktigranyan305-netizen"]
 license = "MIT"
