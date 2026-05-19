@@ -75,6 +75,15 @@ modal will keep re-appearing on every connect.
 the root-owned xray process. `sudo` (from any standard distribution)
 is also required.
 
+The keyring must be **unlocked** when v2rayV reads the saved
+password — otherwise the Secret Service backend will block the
+calling thread on a D-Bus prompt asking the user to unlock it. On
+GNOME/Cinnamon/XFCE the keyring is unlocked at login via PAM, so
+in practice this just works. On minimal/tiling WM setups you may
+need to run `gnome-keyring-daemon --start --components=secrets`
+(or the equivalent for KWallet / KeePassXC) before launching
+v2rayV.
+
 ---
 
 ## Quick Start
