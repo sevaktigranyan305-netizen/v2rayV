@@ -306,7 +306,17 @@ impl XrayManager {
             let exe = std::env::current_exe()
                 .map_err(|e| AppError::Config(format!("Failed to get exe path: {e}")))?;
             let exe_dir = exe.parent().unwrap();
+            // Tauri appends the rust target triple to externalBin names. Pick
+            // ours at compile time so the aarch64 Linux build looks for the
+            // matching sidecar instead of the x86_64 one. (Currently this
+            // branch is unreachable at runtime because Linux is L3-only and
+            // takes the priv_xray path before getting here, but keep the
+            // path arch-correct so a future relaxation doesn't silently
+            // resolve to a missing binary.)
+            #[cfg(target_arch = "x86_64")]
             let sidecar_name = "hev-socks5-tunnel-x86_64-unknown-linux-gnu";
+            #[cfg(target_arch = "aarch64")]
+            let sidecar_name = "hev-socks5-tunnel-aarch64-unknown-linux-gnu";
             let path = exe_dir.join(sidecar_name);
             let hev_bin = if path.exists() {
                 path
