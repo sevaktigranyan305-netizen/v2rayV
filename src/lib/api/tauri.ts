@@ -14,39 +14,43 @@ import type {
 /**
  * Start xray-core and connect to the given server.
  *
- * On macOS the backend may return `{ kind: 'NeedsSudoPassword' }`
+ * On macOS / Linux the backend may return `{ kind: 'NeedsSudoPassword' }`
  * instead of starting xray: that means there is no sudo password
- * cached in Keychain yet, the UI must show its `SudoPasswordModal`,
- * call `macosStoreSudoPassword`, and retry this `connect()`.
+ * cached in the OS credential store yet, the UI must show its
+ * `SudoPasswordModal`, call `storeSudoPassword`, and retry this
+ * `connect()`.
  */
 export async function connect(config: ServerConfig): Promise<ConnectOutcome> {
 	return await invoke<ConnectOutcome>('connect', { serverConfig: config });
 }
 
 /**
- * macOS: returns true if the user's sudo password is already cached
- * in Keychain. On Windows/Linux always returns false.
+ * macOS / Linux: returns true if the user's sudo password is already
+ * cached in the OS credential store (Keychain on macOS, Secret
+ * Service on Linux). On Windows always returns false.
  */
-export async function macosHasSudoPassword(): Promise<boolean> {
-	return await invoke<boolean>('macos_has_sudo_password');
+export async function hasSudoPassword(): Promise<boolean> {
+	return await invoke<boolean>('has_sudo_password');
 }
 
 /**
- * macOS: validate `password` against `sudo -v` and, if it works, save
- * it to Keychain for future connects. Rejects with a descriptive
- * error string if sudo refuses the password or the Keychain write
- * fails. No-op on other platforms (returns rejected promise).
+ * macOS / Linux: validate `password` against `sudo -v` and, if it
+ * works, save it to the OS credential store for future connects.
+ * Rejects with a descriptive error string if sudo refuses the
+ * password or the credential store write fails. No-op error on
+ * Windows.
  */
-export async function macosStoreSudoPassword(password: string): Promise<void> {
-	await invoke<void>('macos_store_sudo_password', { password });
+export async function storeSudoPassword(password: string): Promise<void> {
+	await invoke<void>('store_sudo_password', { password });
 }
 
 /**
- * macOS: drop the cached sudo password from Keychain. Called when the
- * backend signals the saved password no longer authenticates.
+ * macOS / Linux: drop the cached sudo password from the OS credential
+ * store. Called when the backend signals the saved password no longer
+ * authenticates.
  */
-export async function macosClearSudoPassword(): Promise<void> {
-	await invoke<void>('macos_clear_sudo_password');
+export async function clearSudoPassword(): Promise<void> {
+	await invoke<void>('clear_sudo_password');
 }
 
 export async function disconnect(): Promise<void> {

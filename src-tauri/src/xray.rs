@@ -9,15 +9,15 @@ use tauri_plugin_shell::ShellExt;
 
 use crate::config;
 use crate::config::generate_client_config;
-#[cfg(target_os = "macos")]
-use crate::macos_helper;
-#[cfg(target_os = "macos")]
-use crate::macos_xray;
 use crate::models::{
     AppError, ConnectionInfo, ConnectionStatus, DetectedVpn, LogEntry, ServerConfig, SpeedStats,
 };
 use crate::network;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::priv_xray;
 use crate::proxy;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use crate::secret_store;
 #[cfg(target_os = "linux")]
 use crate::tun;
 
@@ -26,11 +26,13 @@ const MAX_LOG_ENTRIES: usize = 1000;
 
 pub struct XrayManager {
     child: Arc<Mutex<Option<CommandChild>>>,
-    /// macOS-only sudo+xray handle. Lives next to `child` (which stays
-    /// None on macOS) so the rest of XrayManager doesn't need to know
-    /// which spawn path produced the running process.
-    #[cfg(target_os = "macos")]
-    macos_child: Arc<Mutex<Option<macos_xray::SudoChild>>>,
+    /// Unix-only sudo+xray handle. Lives next to `child` (which stays
+    /// None when we use the privileged spawn path) so the rest of
+    /// XrayManager doesn't need to know which spawn path produced the
+    /// running process. macOS uses this for every connection; Linux
+    /// uses it for L3 connections only.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    priv_child: Arc<Mutex<Option<priv_xray::SudoChild>>>,
     state: Arc<Mutex<ConnectionInfo>>,
     config_path: Arc<Mutex<Option<std::path::PathBuf>>>,
     stats: Arc<Mutex<SpeedStats>>,
@@ -56,8 +58,8 @@ impl XrayManager {
     pub fn new() -> Self {
         Self {
             child: Arc::new(Mutex::new(None)),
-            #[cfg(target_os = "macos")]
-            macos_child: Arc::new(Mutex::new(None)),
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            priv_child: Arc::new(Mutex::new(None)),
             state: Arc::new(Mutex::new(ConnectionInfo::default())),
             config_path: Arc::new(Mutex::new(None)),
             stats: Arc::new(Mutex::new(SpeedStats::default())),
@@ -120,13 +122,13 @@ impl XrayManager {
         Ok(())
     }
 
-    // The allow attributes here apply only on macOS: when
-    // target_os = "macos" the function returns inside the cfg block
-    // below and clippy/rustc would otherwise flag the Tauri-sidecar
-    // path as unreachable / its locals as unused. The sidecar path is
-    // still type-checked on every target, which is what we want.
+    // The allow attributes here apply on macOS / Linux L3: when the
+    // privileged spawn path returns inside the cfg block below,
+    // clippy/rustc would otherwise flag the Tauri-sidecar path as
+    // unreachable / its locals as unused. The sidecar path is still
+    // type-checked on every target, which is what we want.
     #[cfg_attr(
-        target_os = "macos",
+        any(target_os = "macos", target_os = "linux"),
         allow(unreachable_code, unused_variables, unused_mut, unused_assignments)
     )]
     fn start_desktop<R: Runtime>(
@@ -143,11 +145,11 @@ impl XrayManager {
                 info!("Killed stale xray process");
             }
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            let mut guard = self.macos_child.lock().unwrap();
+            let mut guard = self.priv_child.lock().unwrap();
             if let Some(sc) = guard.take() {
-                if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                if let Err(e) = priv_xray::stop_sudo_child(&sc) {
                     warn!("Failed to kill stale sudo+xray process group: {e}");
                 } else {
                     info!("Killed stale sudo+xray process group");
@@ -245,16 +247,25 @@ impl XrayManager {
             *path = Some(config_file.clone());
         }
 
-        // On macOS we have to launch xray under `sudo -S` so it can
-        // open a utun device for L3 mode. The cross-platform
+        // On Unix desktops we have to launch xray under `sudo -S` so
+        // it can open the platform's TUN device (utun on macOS,
+        // /dev/net/tun on Linux) for L3 mode. The cross-platform
         // Tauri-sidecar spawn that follows inherits the GUI user's
-        // privileges and would fail with EPERM on utun creation, so we
-        // short-circuit here and let `start_desktop_macos` run xray via
-        // std::process::Command instead. The macOS path is also the
-        // only one that uses the Keychain-cached sudo password.
+        // privileges and would fail with EPERM on TUN creation, so we
+        // short-circuit here and let `start_desktop_priv` run xray via
+        // std::process::Command instead. macOS does this for every
+        // connection (we only support L3 on macOS). Linux only takes
+        // this path for L3 servers; SOCKS-mode servers (which we no
+        // longer accept in `connect`) would have fallen through to the
+        // Tauri-sidecar path.
         #[cfg(target_os = "macos")]
         {
-            self.start_desktop_macos(app, server, &config_file)?;
+            self.start_desktop_priv(app, server, &config_file)?;
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if l3_mode {
+            self.start_desktop_priv(app, server, &config_file)?;
             return Ok(());
         }
 
@@ -295,7 +306,17 @@ impl XrayManager {
             let exe = std::env::current_exe()
                 .map_err(|e| AppError::Config(format!("Failed to get exe path: {e}")))?;
             let exe_dir = exe.parent().unwrap();
+            // Tauri appends the rust target triple to externalBin names. Pick
+            // ours at compile time so the aarch64 Linux build looks for the
+            // matching sidecar instead of the x86_64 one. (Currently this
+            // branch is unreachable at runtime because Linux is L3-only and
+            // takes the priv_xray path before getting here, but keep the
+            // path arch-correct so a future relaxation doesn't silently
+            // resolve to a missing binary.)
+            #[cfg(target_arch = "x86_64")]
             let sidecar_name = "hev-socks5-tunnel-x86_64-unknown-linux-gnu";
+            #[cfg(target_arch = "aarch64")]
+            let sidecar_name = "hev-socks5-tunnel-aarch64-unknown-linux-gnu";
             let path = exe_dir.join(sidecar_name);
             let hev_bin = if path.exists() {
                 path
@@ -741,16 +762,18 @@ impl XrayManager {
         Ok(())
     }
 
-    /// macOS L3-only spawn path. Reads the user's sudo password from
-    /// Keychain (which the UI is responsible for filling before the
-    /// first connect), runs xray under `sudo -S` so it can claim a
-    /// utun device, and installs the same Connecting → Connected /
-    /// Connecting → Error / 15 s timeout / 6 s fallback watchdogs that
-    /// the cross-platform sidecar path uses on Windows and Linux. The
-    /// Tauri sidecar API is not used here because it spawns xray as
-    /// the GUI user, which would fail when xray tries to open utun.
-    #[cfg(target_os = "macos")]
-    fn start_desktop_macos<R: Runtime>(
+    /// Unix L3-only spawn path. Reads the user's sudo password from
+    /// the OS credential store (Keychain on macOS, Secret Service on
+    /// Linux) which the UI is responsible for filling before the
+    /// first connect, runs xray under `sudo -S` so it can claim the
+    /// platform's TUN device, and installs the same Connecting →
+    /// Connected / Connecting → Error / 15 s timeout / 6 s fallback
+    /// watchdogs that the cross-platform sidecar path uses on Windows.
+    /// The Tauri sidecar API is not used here because it spawns xray
+    /// as the GUI user, which would fail when xray tries to open the
+    /// TUN device.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn start_desktop_priv<R: Runtime>(
         &self,
         app: &AppHandle<R>,
         server: &ServerConfig,
@@ -758,27 +781,27 @@ impl XrayManager {
     ) -> Result<(), AppError> {
         if !self.l3_mode.load(std::sync::atomic::Ordering::Acquire) {
             return Err(AppError::XrayProcess(
-                "macOS only supports L3 (vnet=1) servers. The selected server is missing \
+                "Privileged spawn path is L3-only. The selected server is missing \
                  vnet=1/vnetIp= parameters."
                     .to_string(),
             ));
         }
 
-        let password = macos_helper::read_password().ok_or_else(|| {
+        let password = secret_store::read_password().ok_or_else(|| {
             AppError::XrayProcess(
-                "No macOS sudo password saved. Please enter your password when prompted \
+                "No sudo password saved. Please enter your password when prompted \
                  and try again."
                     .to_string(),
             )
         })?;
 
-        let xray_bin = macos_xray::locate_xray_binary()?;
-        info!("macOS xray binary: {}", xray_bin.display());
+        let xray_bin = priv_xray::locate_xray_binary()?;
+        info!("xray binary: {}", xray_bin.display());
 
         let started_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let output_seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        let sudo_child = macos_xray::spawn_xray_sudo(
+        let sudo_child = priv_xray::spawn_xray_sudo(
             app,
             &xray_bin,
             config_file,
@@ -795,7 +818,7 @@ impl XrayManager {
         )?;
 
         {
-            let mut guard = self.macos_child.lock().unwrap();
+            let mut guard = self.priv_child.lock().unwrap();
             *guard = Some(sudo_child);
         }
 
@@ -804,7 +827,7 @@ impl XrayManager {
         // timeout in start_desktop.
         {
             let timeout_state = self.state.clone();
-            let timeout_macos_child = self.macos_child.clone();
+            let timeout_priv_child = self.priv_child.clone();
             let timeout_logs = self.logs.clone();
             let timeout_app = app.clone();
             let started = started_flag.clone();
@@ -815,7 +838,7 @@ impl XrayManager {
                 }
                 let mut s = timeout_state.lock().unwrap();
                 if s.status == ConnectionStatus::Connecting {
-                    warn!("Connection timeout after 15 seconds (macOS)");
+                    warn!("Connection timeout after 15 seconds (sudo+xray)");
                     push_log_entry(
                         &timeout_logs,
                         "error",
@@ -827,9 +850,9 @@ impl XrayManager {
                     );
                     s.connected_since = None;
                     drop(s);
-                    let sc = { timeout_macos_child.lock().unwrap().take() };
+                    let sc = { timeout_priv_child.lock().unwrap().take() };
                     if let Some(sc) = sc {
-                        if let Err(e) = macos_xray::stop_sudo_child(&sc) {
+                        if let Err(e) = priv_xray::stop_sudo_child(&sc) {
                             warn!("Timeout watchdog: failed to kill sudo+xray: {e}");
                         }
                     }
@@ -860,7 +883,9 @@ impl XrayManager {
                     return;
                 }
                 if mark_connected(&fb_started, &fb_state, &fb_server_name, &fb_server_address) {
-                    warn!("xray fallback connection trigger: 'started' log not observed (macOS)");
+                    warn!(
+                        "xray fallback connection trigger: 'started' log not observed (sudo+xray)"
+                    );
                     push_log_entry(
                         &fb_logs,
                         "info",
@@ -949,18 +974,19 @@ impl XrayManager {
             info!("Hard-killed xray process (pid={pid})");
         }
 
-        // macOS uses a separate sudo+xray child (see start_desktop_macos).
-        // The wait thread spawned in spawn_xray_sudo will see the kill
-        // and drive the Connecting → Disconnected transition + emit
-        // the connection-status-changed event on its own.
-        #[cfg(target_os = "macos")]
+        // macOS / Linux L3 use a separate sudo+xray child (see
+        // start_desktop_priv). The wait thread spawned in
+        // spawn_xray_sudo will see the kill and drive the Connecting
+        // → Disconnected transition + emit the
+        // connection-status-changed event on its own.
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            let sc = { self.macos_child.lock().unwrap().take() };
+            let sc = { self.priv_child.lock().unwrap().take() };
             if let Some(sc) = sc {
                 // Propagate so the UI can show a real error instead of
                 // silently transitioning to Disconnected while xray is
                 // still alive in the background.
-                macos_xray::stop_sudo_child(&sc)?;
+                priv_xray::stop_sudo_child(&sc)?;
             }
         }
         let t3 = std::time::Instant::now();

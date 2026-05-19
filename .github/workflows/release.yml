@@ -22,6 +22,10 @@ jobs:
             rust_target: x86_64-unknown-linux-gnu
             hev_binary: hev-socks5-tunnel-linux-x86_64
             hev_sidecar_name: hev-socks5-tunnel-x86_64-unknown-linux-gnu
+          - platform: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            hev_binary: hev-socks5-tunnel-linux-arm64
+            hev_sidecar_name: hev-socks5-tunnel-aarch64-unknown-linux-gnu
           - platform: windows-latest
             rust_target: x86_64-pc-windows-msvc
             hev_binary: ""
@@ -64,7 +68,7 @@ jobs:
 
       # Linux-specific system dependencies
       - name: Install Linux dependencies
-        if: matrix.platform == 'ubuntu-latest'
+        if: startsWith(matrix.platform, 'ubuntu-')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -108,7 +112,7 @@ jobs:
 
       # Collect artifacts with platform-specific names
       - name: Collect Linux artifacts
-        if: matrix.platform == 'ubuntu-latest'
+        if: startsWith(matrix.platform, 'ubuntu-')
         shell: bash
         run: |
           mkdir -p release-assets

@@ -31,3 +31,11 @@ tauri-plugin-clipboard-manager = "2.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
+
+# Linux uses the Secret Service D-Bus protocol (provided by
+# gnome-keyring, kwallet, keepassxc, etc.) to persist the sudo
+# password — same role as macOS Keychain. The blocking sync
+# backend avoids dragging tokio into the rest of the codebase.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+keyring = { version = "3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
